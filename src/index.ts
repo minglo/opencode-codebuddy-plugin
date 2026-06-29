@@ -138,6 +138,8 @@ const sessionConversationIds = new LRUMap<string, string>(
   CONFIG.conversationIdMapMax,
 );
 
+let refreshInFlight: Promise<RefreshResponse["data"] | null> | null = null;
+
 function remoteModelToConfig(m: RemoteModel): Record<string, unknown> {
   const entry: Record<string, unknown> = { name: m.name };
   if (m.maxInputTokens || m.maxOutputTokens) {
@@ -151,7 +153,10 @@ function remoteModelToConfig(m: RemoteModel): Record<string, unknown> {
   return entry;
 }
 
-async function fetchRemoteModels(accessToken: string): Promise<RemoteModel[]> {
+async function fetchRemoteModels(
+  accessToken: string,
+  signal?: AbortSignal,
+): Promise<RemoteModel[]> {
   const headers: Record<string, string> = {
     Accept: "application/json, text/plain, */*",
     "Content-Type": "application/json",
@@ -167,7 +172,10 @@ async function fetchRemoteModels(accessToken: string): Promise<RemoteModel[]> {
     "X-Product": CONFIG.product,
     "User-Agent": `${CONFIG.ideName}/${CONFIG.ideVersion} CodeBuddy/${CONFIG.appVersion}`,
   };
-  const resp = await fetch(`${resolvedServerUrl}/v3/config`, { headers });
+  const resp = await fetch(`${resolvedServerUrl}/v3/config`, {
+    headers,
+    signal,
+  });
   if (!resp.ok) return [];
   const body = (await resp.json()) as RemoteConfigResponse;
   if (body.code !== 0 || !body.data) return [];
@@ -313,6 +321,23 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function withTimeout(ms: number, external?: AbortSignal) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  const onAbort = () => ctrl.abort();
+  if (external) {
+    if (external.aborted) ctrl.abort();
+    else external.addEventListener("abort", onAbort, { once: true });
+  }
+  return {
+    signal: ctrl.signal,
+    cancel: () => {
+      clearTimeout(timer);
+      external?.removeEventListener("abort", onAbort);
+    },
+  };
+}
+
 async function requestAuthState(): Promise<{ state: string; url: string }> {
   const params = new URLSearchParams({ platform: CONFIG.platform, ioa: "1" });
   const response = await fetch(
@@ -351,6 +376,7 @@ async function pollForToken(
   while (Date.now() < expiresAt) {
     if (signal?.aborted) return null;
     await sleep(3000);
+    const t = withTimeout(8000, signal);
     try {
       const response = await fetch(
         `${resolvedServerUrl}/v2/plugin/auth/token?state=${state}`,
@@ -363,7 +389,7 @@ async function pollForToken(
             "X-No-Enterprise-Id": "true",
             "X-No-Department-Info": "true",
           },
-          signal,
+          signal: t.signal,
         },
       );
       if (response.ok) {
@@ -372,6 +398,8 @@ async function pollForToken(
       }
     } catch {
       if (signal?.aborted) return null;
+    } finally {
+      t.cancel();
     }
   }
   return null;
@@ -380,6 +408,7 @@ async function pollForToken(
 async function refreshAccessToken(
   refreshToken: string,
 ): Promise<RefreshResponse["data"] | null> {
+  const t = withTimeout(5000);
   try {
     const response = await fetch(
       `${resolvedServerUrl}/v2/plugin/auth/token/refresh`,
@@ -390,14 +419,29 @@ async function refreshAccessToken(
           Accept: "application/json",
           Authorization: `Bearer ${refreshToken}`,
         },
+        signal: t.signal,
       },
     );
-    if (!response.ok) return null;
+    if (!response.ok) {
+      const text = await response.text();
+      console.error(
+        `[codebuddy] token refresh failed: ${response.status} - ${text}`,
+      );
+      return null;
+    }
     const data = (await response.json()) as RefreshResponse;
-    if (data.code !== 0) return null;
+    if (data.code !== 0) {
+      console.error(
+        `[codebuddy] token refresh bad code: ${data.code} - ${JSON.stringify(data)}`,
+      );
+      return null;
+    }
     return data.data || null;
-  } catch {
+  } catch (err) {
+    console.error(`[codebuddy] token refresh threw:`, err);
     return null;
+  } finally {
+    t.cancel();
   }
 }
 
@@ -416,10 +460,7 @@ export const CodeBuddyAuthPlugin: Plugin = async (input) => {
           models: {},
         };
       }
-      const provider = config.provider[PROVIDER_ID] as
-        | Record<string, unknown>
-        | undefined;
-      if (!provider) return;
+      const provider = config.provider[PROVIDER_ID] as Record<string, unknown>;
       const opts = (provider.options || {}) as Record<string, unknown>;
       const configuredBase =
         typeof opts.baseURL === "string" ? opts.baseURL : undefined;
@@ -456,13 +497,20 @@ export const CodeBuddyAuthPlugin: Plugin = async (input) => {
         const auth = all[PROVIDER_ID];
         if (auth?.type === "oauth" && auth.access) {
           authAvailable = true;
-          const work = fetchRemoteModels(auth.access);
-          discovered = await Promise.race([
-            work,
-            new Promise<RemoteModel[]>((resolve) =>
-              setTimeout(() => resolve([]), DISCOVERY_TIMEOUT_MS),
-            ),
-          ]);
+          const ac = new AbortController();
+          const timer = setTimeout(() => ac.abort(), DISCOVERY_TIMEOUT_MS);
+          const work = fetchRemoteModels(auth.access, ac.signal);
+          try {
+            discovered = await Promise.race([
+              work,
+              new Promise<RemoteModel[]>((resolve) =>
+                setTimeout(() => resolve([]), DISCOVERY_TIMEOUT_MS),
+              ),
+            ]);
+          } finally {
+            clearTimeout(timer);
+            ac.abort();
+          }
         }
       } catch {
         // auth not available yet, use fallback
@@ -545,6 +593,7 @@ export const CodeBuddyAuthPlugin: Plugin = async (input) => {
                   method: "POST",
                   headers: merged,
                   body: init?.body,
+                  signal: init?.signal,
                 },
               );
             };
@@ -556,21 +605,36 @@ export const CodeBuddyAuthPlugin: Plugin = async (input) => {
               currentAuth.refresh
             ) {
               console.log("[codebuddy] Token expired, attempting refresh...");
-              const refreshed = await refreshAccessToken(currentAuth.refresh);
+              if (!refreshInFlight) {
+                refreshInFlight = refreshAccessToken(currentAuth.refresh).finally(
+                  () => {
+                    refreshInFlight = null;
+                  },
+                );
+              }
+              const refreshed = await refreshInFlight;
               if (refreshed?.accessToken) {
                 accessToken = refreshed.accessToken;
                 const newExpires = refreshed.expiresIn
                   ? Date.now() + refreshed.expiresIn * 1000
                   : Date.now() + 24 * 60 * 60 * 1000;
-                await input.client.auth.set({
-                  path: { id: PROVIDER_ID },
-                  body: {
-                    type: "oauth",
-                    access: refreshed.accessToken,
-                    refresh: refreshed.refreshToken || currentAuth.refresh,
-                    expires: newExpires,
-                  },
-                });
+                const writeBody = {
+                  type: "oauth" as const,
+                  access: refreshed.accessToken,
+                  refresh: refreshed.refreshToken || currentAuth.refresh,
+                  expires: newExpires,
+                };
+                try {
+                  await input.client.auth.set({
+                    path: { id: PROVIDER_ID },
+                    body: writeBody,
+                  });
+                } catch (err) {
+                  console.error(
+                    "[codebuddy] failed to persist refreshed token, continuing in-memory:",
+                    err,
+                  );
+                }
                 response = await doRequest(accessToken);
               }
             }
@@ -580,9 +644,11 @@ export const CodeBuddyAuthPlugin: Plugin = async (input) => {
               console.error(
                 `[codebuddy] API error: ${response.status} - ${errorText}`,
               );
+              const errorHeaders = new Headers(response.headers);
+              errorHeaders.set("Content-Type", "application/json");
               return new Response(errorText, {
                 status: response.status,
-                headers: { "Content-Type": "application/json" },
+                headers: errorHeaders,
               });
             }
 
@@ -622,22 +688,15 @@ export const CodeBuddyAuthPlugin: Plugin = async (input) => {
       ],
     },
     async "chat.message"(input, _output) {
-      if (input.sessionID) {
-        getOrCreateConversationId(input.sessionID);
-      }
+      getOrCreateConversationId(input.sessionID);
     },
     async "chat.headers"(input, output) {
-      if (input.provider.source === undefined) return;
       if (input.model.providerID !== PROVIDER_ID) return;
       const modelId = resolveModel(input.model.id);
       const headers = buildRequestHeaders(input.sessionID, modelId);
       for (const [k, v] of Object.entries(headers)) {
         output.headers[k] = v;
       }
-    },
-    async "chat.params"(input, output) {
-      if (input.model.providerID !== PROVIDER_ID) return;
-      output.options.baseURL = resolvedServerUrl;
     },
   } satisfies Hooks;
 };
