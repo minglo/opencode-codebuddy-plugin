@@ -3,8 +3,9 @@
 OpenCode plugin that wires [CodeBuddy](https://www.codebuddy.cn) (a.k.a. **IOA**, Tencent's coding agent) into OpenCode as an authenticated provider. It implements the six OpenCode plugin hooks required to authenticate, model-discover, and proxy chat-completions requests against the CodeBuddy API.
 
 Supports **two authentication modes**:
+
 - **OAuth** — runs the IOA `/v2/plugin/auth/state` → browser → poll flow.
-- **API Key** — paste a `ck_xxx` CodeBuddy API Key generated from the CodeBuddy website; uses a static model list.
+- **API Key** — paste a `ck_xxx` CodeBuddy API Key generated from the CodeBuddy website; models are configured in `opencode.json`.
 
 > Source is a single file: [`src/index.ts`](./src/index.ts). The build artifact is `dist/index.js`.
 
@@ -14,7 +15,7 @@ Supports **two authentication modes**:
 
 - **OAuth login** — runs the IOA `/v2/plugin/auth/state` → browser → poll flow directly from your editor.
 - **API Key login** — paste a `ck_xxx` key at `/connect codebuddy`; no browser flow, no token polling, no refresh.
-- **Automatic model discovery** — calls `GET /v3/config` at startup (OAuth mode) and populates `provider.codebuddy.models` with every craft-agent model that supports tool calls. In API Key mode, a configurable static list from `CODEBUDDY_MODELS` is used.
+- **Automatic model discovery** — calls `GET /v3/config` at startup (OAuth mode) and populates `provider.codebuddy.models` with every craft-agent model that supports tool calls. In API Key mode, models are read from `opencode.json` configuration (user must declare models with `limit` to enable usage% display).
 - **Token auto-refresh on 401/403** — the custom `fetch` interceptor catches auth failures (OAuth only), calls `/v2/plugin/auth/token/refresh`, writes the new token back to `auth.json`, and retries the request once.
 - **Stable per-session `X-Conversation-ID`** — promotes the upstream prompt cache by reusing the same conversation UUID for every turn within an OpenCode session (cleared on `session.compacted` / `session.deleted`).
 - **Environment switch** — the same plugin serves `copilot.tencent.com` (CN, default) and `www.codebuddy.ai` (international); switchable via `CODEBUDDY_INTERNET_ENVIRONMENT` or by setting `CODEBUDDY_API_ENDPOINT` directly.
@@ -45,14 +46,14 @@ and on 401/403 refresh the token and retry once
   ▼  upstream CodeBuddy API
 ```
 
-| Hook | Purpose |
-|---|---|
-| `config` | Auto-injects the `codebuddy` provider if missing, then enriches `models` from `/v3/config`. |
-| `event` | Listens for `session.compacted` / `session.deleted` and evicts the corresponding LRU entry. |
-| `chat.message` | Pre-warms the conversationId LRU for the new session. |
-| `chat.headers` | Sets non-auth headers (`X-Conversation-ID`, `B3`, `X-Model-ID`, …). |
-| `auth.loader` | Returns `{ apiKey, baseURL, fetch }`; the custom `fetch` injects auth and handles 401/403. |
-| `chat.params` | Overrides `options.baseURL` to the resolved server URL. |
+| Hook             | Purpose                                                                                          |
+| ---------------- | ------------------------------------------------------------------------------------------------ |
+| `config`       | Auto-injects the`codebuddy` provider if missing, then enriches `models` from `/v3/config`. |
+| `event`        | Listens for`session.compacted` / `session.deleted` and evicts the corresponding LRU entry.   |
+| `chat.message` | Pre-warms the conversationId LRU for the new session.                                            |
+| `chat.headers` | Sets non-auth headers (`X-Conversation-ID`, `B3`, `X-Model-ID`, …).                       |
+| `auth.loader`  | Returns`{ apiKey, baseURL, fetch }`; the custom `fetch` injects auth and handles 401/403.    |
+| `chat.params`  | Overrides`options.baseURL` to the resolved server URL.                                         |
 
 Only `chat.headers` and `chat.params` are gated on `input.model.providerID === "codebuddy"`.
 
@@ -129,19 +130,18 @@ In modes 1 and 2 the plugin overwrites `models` with the discovered list. In mod
 
 All variables are read **once**, at plugin load time, when the `CONFIG` object is initialized. Changing them at runtime has no effect.
 
-| Variable | Default | Effect |
-|---|---|---|
-| `CODEBUDDY_AUTH_MODE` | `auto` | `auto` (use API Key if `CODEBUDDY_API_KEY` is set, otherwise OAuth), `oauth` (force OAuth), or `api` (force API Key). |
-| `CODEBUDDY_API_KEY` | _(empty)_ | CodeBuddy API Key (`ck_xxx`). Takes priority over `/connect`-stored key. Implies API Key mode in `auto`. |
-| `CODEBUDDY_INTERNET_ENVIRONMENT` | `internal` | `internal` or `ioa` → CN endpoint (`copilot.tencent.com` + `www.codebuddy.cn`); anything else → international (`www.codebuddy.ai`). Ignored if `CODEBUDDY_API_ENDPOINT` is set. |
-| `CODEBUDDY_API_ENDPOINT` | _(empty)_ | Full base URL override (e.g. `https://example.com`). Skips the `CODEBUDDY_INTERNET_ENVIRONMENT` switch. |
-| `CODEBUDDY_MODELS` | `claude-opus-4.6-1m` | Comma-separated model list used in API Key mode (skips `/v3/config` discovery). |
-| `CODEBUDDY_DEFAULT_MODEL` | _(empty)_ | Force-overrides the model OpenCode picks. |
-| `CODEBUDDY_TENANT_ID` | _(from JWT)_ | Overrides the tenant id auto-extracted from the JWT (`iss` / `tenant_id`). OAuth mode only. |
-| `CODEBUDDY_ENTERPRISE_ID` | _(from JWT)_ | Overrides the enterprise id auto-extracted from the JWT roles. OAuth mode only. |
-| `CODEBUDDY_USER_ID` | _(from JWT)_ | Overrides the user id auto-extracted from the JWT (`sub` / `user_id`). OAuth mode only. |
-| `CODEBUDDY_STABLE_CONVERSATION_ID` | `1` | Set to `0` to fall back to per-request UUIDs (disable session-level stabilization). |
-| `CODEBUDDY_CONVERSATION_ID_MAP_MAX` | `1000` | Capacity of the session → conversationId LRU. |
+| Variable                              | Default        | Effect                                                                                                                                                                                        |
+| ------------------------------------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CODEBUDDY_AUTH_MODE`               | `auto`       | `auto` (use API Key if `CODEBUDDY_API_KEY` is set, otherwise OAuth), `oauth` (force OAuth), or `api` (force API Key).                                                                 |
+| `CODEBUDDY_API_KEY`                 | _(empty)_    | CodeBuddy API Key (`ck_xxx`). Takes priority over `/connect`-stored key. Implies API Key mode in `auto`.                                                                                |
+| `CODEBUDDY_INTERNET_ENVIRONMENT`    | `internal`   | `internal` or `ioa` → CN endpoint (`copilot.tencent.com` + `www.codebuddy.cn`); anything else → international (`www.codebuddy.ai`). Ignored if `CODEBUDDY_API_ENDPOINT` is set. |
+| `CODEBUDDY_API_ENDPOINT`            | _(empty)_    | Full base URL override (e.g.`https://example.com`). Skips the `CODEBUDDY_INTERNET_ENVIRONMENT` switch.                                                                                    |
+| `CODEBUDDY_DEFAULT_MODEL`           | _(empty)_    | Force-overrides the model OpenCode picks.                                                                                                                                                     |
+| `CODEBUDDY_TENANT_ID`               | _(from JWT)_ | Overrides the tenant id auto-extracted from the JWT (`iss` / `tenant_id`). OAuth mode only.                                                                                               |
+| `CODEBUDDY_ENTERPRISE_ID`           | _(from JWT)_ | Overrides the enterprise id auto-extracted from the JWT roles. OAuth mode only.                                                                                                               |
+| `CODEBUDDY_USER_ID`                 | _(from JWT)_ | Overrides the user id auto-extracted from the JWT (`sub` / `user_id`). OAuth mode only.                                                                                                   |
+| `CODEBUDDY_STABLE_CONVERSATION_ID`  | `1`          | Set to`0` to fall back to per-request UUIDs (disable session-level stabilization).                                                                                                          |
+| `CODEBUDDY_CONVERSATION_ID_MAP_MAX` | `1000`       | Capacity of the session → conversationId LRU.                                                                                                                                                |
 
 ---
 
@@ -153,12 +153,12 @@ The plugin supports two ways to pick the upstream endpoint:
 2. **`CODEBUDDY_INTERNET_ENVIRONMENT`** — `internal` or `ioa` → CN (`https://copilot.tencent.com` + `X-Domain: www.codebuddy.cn`); anything else → international (`https://www.codebuddy.ai` + `X-Domain: www.codebuddy.ai`).
 3. **`baseURL` in OpenCode config** — when set in `provider.codebuddy.options.baseURL`, the host is also used to re-derive `X-Domain`.
 
-| Configuration | Server | `X-Domain` |
-|---|---|---|
-| _(default, no env vars set)_ | `https://copilot.tencent.com` | `www.codebuddy.cn` |
-| `CODEBUDDY_INTERNET_ENVIRONMENT=internal` | `https://copilot.tencent.com` | `www.codebuddy.cn` |
-| `CODEBUDDY_INTERNET_ENVIRONMENT=external` (or empty) | `https://www.codebuddy.ai` | `www.codebuddy.ai` |
-| `CODEBUDDY_API_ENDPOINT=https://my-proxy.example.com` | the override URL | derived from URL host |
+| Configuration                                           | Server                          | `X-Domain`          |
+| ------------------------------------------------------- | ------------------------------- | --------------------- |
+| _(default, no env vars set)_                          | `https://copilot.tencent.com` | `www.codebuddy.cn`  |
+| `CODEBUDDY_INTERNET_ENVIRONMENT=internal`             | `https://copilot.tencent.com` | `www.codebuddy.cn`  |
+| `CODEBUDDY_INTERNET_ENVIRONMENT=external` (or empty)  | `https://www.codebuddy.ai`    | `www.codebuddy.ai`  |
+| `CODEBUDDY_API_ENDPOINT=https://my-proxy.example.com` | the override URL                | derived from URL host |
 
 The hard-coded `CONFIG.chatCompletionsPath` is `/v2/chat/completions`, so any `baseURL` override must keep the `/v2` segment aligned with the API path. Pointing the plugin at a non-`/v2` API requires patching the source.
 
@@ -174,36 +174,42 @@ The hard-coded `CONFIG.chatCompletionsPath` is `/v2/chat/completions`, so any `b
 Alternatively, set `CODEBUDDY_API_KEY` in the environment; this takes priority over the stored key and avoids the `/connect` flow entirely.
 
 Headers sent in API Key mode:
+
 - `Authorization: Bearer <key>`
 - `X-API-Key: <key>`
 
 No `X-Tenant-Id` / `X-Enterprise-Id` / `X-User-Id` are sent (no JWT to decode), matching the `codebuddy2api` behavior.
 
-The static model list is taken from `CODEBUDDY_MODELS` (comma-separated, default `claude-opus-4.6-1m`). Remote `/v3/config` discovery is **skipped** in API Key mode to avoid an unauthorized request.
+In API Key mode, models are **not** auto-discovered (the `/v3/config` endpoint does not return models for API Key auth). You must declare models in `opencode.json` with their `limit` to enable the usage% display:
 
-A typical `.env` for API Key mode (mirroring the well-known `codebuddy2api` setup):
+```jsonc
+{
+  "plugin": ["opencode-codebuddy-plugin"],
+  "provider": {
+    "codebuddy": {
+      "models": {
+        "claude-opus-4.6-1m": {
+          "name": "Claude Opus 1M",
+          "limit": { "context": 1000000, "output": 32000 },
+          "tool_call": true
+        }
+      }
+    }
+  }
+}
+```
+
+A typical `.env` for API Key mode:
 
 ```env
 CODEBUDDY_AUTH_MODE=api
 CODEBUDDY_API_KEY=ck_xxxxxxxxxxxxxxxx.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 CODEBUDDY_INTERNET_ENVIRONMENT=internal
-CODEBUDDY_MODELS=claude-opus-4.6-1m
 ```
-
-### About error code 14017 (体验版尚未激活)
-
-If your CodeBuddy/IOA account has not yet activated the trial, the upstream API returns:
-
-```json
-{"code": 14017, "msg": "体验版尚未激活。请退出当前账号后重新登录，即可立即激活并开始免费体验。"}
-```
-
-This is an **account-level** issue, not a plugin issue. The plugin passes the error through as-is. To resolve:
-
-1. **Log out and log back in** at [codebuddy.cn](https://www.codebuddy.cn) to activate the trial.
-2. If the issue persists, generate an **API Key** in the CodeBuddy website console and switch to API Key mode — corporate API Keys are not subject to the trial gate.
 
 ---
+
+
 
 ## Caching behavior
 

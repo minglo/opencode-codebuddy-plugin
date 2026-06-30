@@ -34,10 +34,6 @@ const CONFIG = {
     process.env.CODEBUDDY_INTERNET_ENVIRONMENT || "internal"
   ).toLowerCase(),
   apiEndpoint: process.env.CODEBUDDY_API_ENDPOINT || "",
-  apiKeyModels: (process.env.CODEBUDDY_MODELS || "claude-opus-4.6-1m")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean),
 };
 
 interface JwtPayload {
@@ -585,13 +581,9 @@ export const CodeBuddyAuthPlugin: Plugin = async (input) => {
       if (mode === "api") {
         authAvailable = true;
         console.log(
-          "[codebuddy] api key mode — using CODEBUDDY_MODELS static list",
+          "[codebuddy] api key mode — using models from opencode.json config",
         );
-        discovered = CONFIG.apiKeyModels.map((id) => ({
-          id,
-          name: id,
-          supportsToolCall: true,
-        }));
+        discovered = [];
       } else if (storedAuth?.type === "oauth" && storedAuth.access) {
         authAvailable = true;
         const ac = new AbortController();
@@ -626,7 +618,7 @@ export const CodeBuddyAuthPlugin: Plugin = async (input) => {
         );
       }
 
-      if (discovered.length === 0) {
+      if (discovered.length === 0 && Object.keys(models).length === 0) {
         discovered = [DEFAULT_MODEL];
       }
 
@@ -687,12 +679,27 @@ export const CodeBuddyAuthPlugin: Plugin = async (input) => {
               for (const [k, v] of Object.entries(buildAuthHeaders(a))) {
                 merged.set(k, v);
               }
+
+              // Inject stream_options to ensure usage info is returned in streaming responses
+              let body = init?.body;
+              try {
+                const raw =
+                  typeof body === "string"
+                    ? body
+                    : new TextDecoder().decode(body as ArrayBuffer);
+                const parsed = JSON.parse(raw);
+                if (parsed.stream && !parsed.stream_options) {
+                  parsed.stream_options = { include_usage: true };
+                  body = JSON.stringify(parsed);
+                }
+              } catch {}
+
               return fetch(
                 `${resolvedServerUrl}${CONFIG.chatCompletionsPath}`,
                 {
                   method: "POST",
                   headers: merged,
-                  body: init?.body,
+                  body,
                   signal: init?.signal,
                 },
               );
