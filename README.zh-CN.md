@@ -1,6 +1,10 @@
 # opencode-codebuddy-plugin
 
-为 [CodeBuddy](https://www.codebuddy.cn)（即 **IOA**，腾讯编程助手）提供 OpenCode 插件，将 CodeBuddy 作为通过 OAuth 认证的 provider 接入 OpenCode。本插件实现了将 OpenCode 与 CodeBuddy API 对接所需的全部六个 hook。
+为 [CodeBuddy](https://www.codebuddy.cn)（即 **IOA**，腾讯编程助手）提供 OpenCode 插件，将 CodeBuddy 作为已认证 provider 接入 OpenCode。本插件实现了将 OpenCode 与 CodeBuddy API 对接所需的全部六个 hook。
+
+支持 **两种鉴权模式**：
+- **OAuth** — 走 IOA `/v2/plugin/auth/state` → 浏览器 → 轮询拿 token 流程。
+- **API Key** — 直接粘贴在 CodeBuddy 官网生成的 `ck_xxx` Key，使用静态模型列表。
 
 > 单文件项目：[`src/index.ts`](./src/index.ts)。编译产物为 `dist/index.js`。
 
@@ -9,10 +13,11 @@
 ## 特性
 
 - **OAuth 登录** — 直接在编辑器内走 IOA 流程：`/v2/plugin/auth/state` → 浏览器 → 轮询拿 token。
-- **自动模型发现** — 启动时调用 `GET /v3/config`，把支持 tool call 的 craft agent 模型全部写入 `provider.codebuddy.models`（5 秒超时保护，超时则使用单个 `auto` 兜底模型）。
-- **401/403 自动刷新 token** — 自定义 `fetch` 拦截器捕获鉴权失败，调 `/v2/plugin/auth/token/refresh` 拿新 token，写回 `auth.json` 后重试一次。
+- **API Key 登录** — 在 `/connect codebuddy` 处粘贴 `ck_xxx` Key；无需浏览器、不轮询、不刷新。
+- **自动模型发现** — OAuth 模式启动时调用 `GET /v3/config`，把支持 tool call 的 craft agent 模型全部写入 `provider.codebuddy.models`；API Key 模式使用 `CODEBUDDY_MODELS` 指定的静态列表。
+- **401/403 自动刷新 token** — 自定义 `fetch` 拦截器捕获鉴权失败（仅 OAuth 模式），调 `/v2/plugin/auth/token/refresh` 拿新 token，写回 `auth.json` 后重试一次。
 - **session 级 `X-Conversation-ID` 稳定化** — 同一个 OpenCode session 内所有请求复用同一 UUID，跨 turn、跨 tool call 一致，提升上游 prompt cache 命中率（`session.compacted` / `session.deleted` 时清掉 LRU 条目）。
-- **环境自动切换** — 同一份插件同时支持 `copilot.tencent.com`（国内版，默认）和 `www.codebuddy.ai`（国际版）；`X-Domain` 头根据配置的 `baseURL` 自动推导。
+- **环境自动切换** — 同一份插件同时支持 `copilot.tencent.com`（国内版，默认）和 `www.codebuddy.ai`（国际版）；可通过 `CODEBUDDY_INTERNET_ENVIRONMENT` 切换，或直接用 `CODEBUDDY_API_ENDPOINT` 覆盖完整 URL。
 
 ---
 
@@ -126,10 +131,15 @@ npm run build        # tsc → dist/
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
+| `CODEBUDDY_AUTH_MODE` | `auto` | `auto`（若设置了 `CODEBUDDY_API_KEY` 则用 API Key，否则用 OAuth）、`oauth`（强制 OAuth）、`api`（强制 API Key）。 |
+| `CODEBUDDY_API_KEY` | _(空)_ | CodeBuddy API Key（`ck_xxx`）。优先级高于 `/connect` 存储的 key。在 `auto` 模式下隐含启用 API Key 模式。 |
+| `CODEBUDDY_INTERNET_ENVIRONMENT` | `internal` | `internal` 或 `ioa` → 国内端点（`copilot.tencent.com` + `www.codebuddy.cn`）；其他 → 国际（`www.codebuddy.ai`）。若 `CODEBUDDY_API_ENDPOINT` 已设置则忽略此项。 |
+| `CODEBUDDY_API_ENDPOINT` | _(空)_ | 完整 base URL 覆盖（例如 `https://example.com`），跳过 `CODEBUDDY_INTERNET_ENVIRONMENT` 的自动判断。 |
+| `CODEBUDDY_MODELS` | `claude-opus-4.6-1m` | API Key 模式下的模型列表（逗号分隔），跳过 `/v3/config` 发现。 |
 | `CODEBUDDY_DEFAULT_MODEL` | _(空)_ | 强制覆盖 OpenCode 选择的 model。 |
-| `CODEBUDDY_TENANT_ID` | _(从 JWT 提)_ | 覆盖从 JWT `iss` / `tenant_id` 自动提取的 tenant。 |
-| `CODEBUDDY_ENTERPRISE_ID` | _(从 JWT 提)_ | 覆盖从 JWT roles 自动提取的 enterprise。 |
-| `CODEBUDDY_USER_ID` | _(从 JWT 提)_ | 覆盖从 JWT `sub` / `user_id` 自动提取的 user。 |
+| `CODEBUDDY_TENANT_ID` | _(从 JWT 提)_ | 覆盖从 JWT `iss` / `tenant_id` 自动提取的 tenant。仅 OAuth 模式。 |
+| `CODEBUDDY_ENTERPRISE_ID` | _(从 JWT 提)_ | 覆盖从 JWT roles 自动提取的 enterprise。仅 OAuth 模式。 |
+| `CODEBUDDY_USER_ID` | _(从 JWT 提)_ | 覆盖从 JWT `sub` / `user_id` 自动提取的 user。仅 OAuth 模式。 |
 | `CODEBUDDY_STABLE_CONVERSATION_ID` | `1` | 设为 `0` 降级为 per-request UUID（关闭 session 级稳定化）。 |
 | `CODEBUDDY_CONVERSATION_ID_MAP_MAX` | `1000` | session → conversationId LRU 的最大容量。 |
 
@@ -137,14 +147,61 @@ npm run build        # tsc → dist/
 
 ## 环境切换
 
-插件**不硬编码**地区，而是从你配置中的 `baseURL` 自动推导上游域名：
+插件支持两种方式选上游端点：
 
-| baseURL | 实际 `X-Domain` |
-|---|---|
-| `https://copilot.tencent.com/v2` _(默认)_ | `www.codebuddy.cn` |
-| `https://www.codebuddy.ai/v2` | `www.codebuddy.ai` |
+1. **`CODEBUDDY_API_ENDPOINT`** — 完整 base URL 覆盖，优先级最高。
+2. **`CODEBUDDY_INTERNET_ENVIRONMENT`** — `internal` 或 `ioa` → 国内（`https://copilot.tencent.com` + `X-Domain: www.codebuddy.cn`）；其他 → 国际（`https://www.codebuddy.ai` + `X-Domain: www.codebuddy.ai`）。
+3. **OpenCode 配置里的 `baseURL`** — 若在 `provider.codebuddy.options.baseURL` 中显式设置，会再次根据 host 推导 `X-Domain`。
+
+| 配置 | Server | `X-Domain` |
+|---|---|---|
+| _(默认，无 env 变量)_ | `https://copilot.tencent.com` | `www.codebuddy.cn` |
+| `CODEBUDDY_INTERNET_ENVIRONMENT=internal` | `https://copilot.tencent.com` | `www.codebuddy.cn` |
+| `CODEBUDDY_INTERNET_ENVIRONMENT=external`（或留空） | `https://www.codebuddy.ai` | `www.codebuddy.ai` |
+| `CODEBUDDY_API_ENDPOINT=https://my-proxy.example.com` | 覆盖的 URL | 从 URL host 推导 |
 
 `CONFIG.chatCompletionsPath` 硬编码为 `/v2/chat/completions`，所以 baseURL 中的 `/v2` 必须与 API path 保持一致。要切换到非 `/v2` 的 API，需要同步改源码。
+
+---
+
+## API Key 模式
+
+`/connect codebuddy` 现在提供 **两个选项**：
+
+1. **IOA 登录 (浏览器)** — 原始 OAuth 流程。
+2. **API Key** — 粘贴 `ck_xxx` Key，存入 `auth.json` 的 `{ type: "api", key }`。
+
+也可以直接设置 `CODEBUDDY_API_KEY` 环境变量，优先级高于存储的 key，并且完全不需要走 `/connect` 流程。
+
+API Key 模式下发的请求头：
+- `Authorization: Bearer <key>`
+- `X-API-Key: <key>`
+
+**不发送** `X-Tenant-Id` / `X-Enterprise-Id` / `X-User-Id`（没有 JWT 可解），与 `codebuddy2api` 行为一致。
+
+模型列表从 `CODEBUDDY_MODELS` 读取（逗号分隔，默认 `claude-opus-4.6-1m`）。**跳过**远程 `/v3/config` 发现，避免无权访问该接口。
+
+API Key 模式的典型 `.env`（对齐常见的 `codebuddy2api` 配置）：
+
+```env
+CODEBUDDY_AUTH_MODE=api
+CODEBUDDY_API_KEY=ck_xxxxxxxxxxxxxxxx.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+CODEBUDDY_INTERNET_ENVIRONMENT=internal
+CODEBUDDY_MODELS=claude-opus-4.6-1m
+```
+
+### 关于错误码 14017（体验版尚未激活）
+
+如果你的 CodeBuddy/IOA 账号尚未激活体验版，上游 API 会返回：
+
+```json
+{"code": 14017, "msg": "体验版尚未激活。请退出当前账号后重新登录，即可立即激活并开始免费体验。"}
+```
+
+这是**账号级别**的问题，不是插件问题，插件只是原样透传。解决方法：
+
+1. 在 [codebuddy.cn](https://www.codebuddy.cn) **退出账号后重新登录**即可激活体验版。
+2. 如果重登后仍报此错，在 CodeBuddy 官网控制台**生成 API Key** 并切换到 API Key 模式 — 企业 API Key 不受体验版限制。
 
 ---
 
@@ -186,7 +243,8 @@ Remove-Item ~/.config/opencode/plugins/codebuddy-plugin.js
 
 - 路径：`~/.local/share/opencode/auth.json`
 - `config` hook 直接 `fs.readFileSync` 读取。
-- 刷新成功后通过 `input.client.auth.set({ path: { id: "codebuddy" }, body: { type: "oauth", access, refresh, expires } })` 写回。
+- OAuth 模式：刷新成功后通过 `input.client.auth.set({ path: { id: "codebuddy" }, body: { type: "oauth", access, refresh, expires } })` 写回。
+- API Key 模式：key 也存在该路径，但**不刷新**（需要在 CodeBuddy 官网手动重新生成）。环境变量 `CODEBUDDY_API_KEY` 始终优先于存储值。
 
 ---
 

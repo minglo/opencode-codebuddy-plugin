@@ -28,6 +28,16 @@ const CONFIG = {
   stableConversationId: process.env.CODEBUDDY_STABLE_CONVERSATION_ID !== "0",
   conversationIdMapMax:
     Number(process.env.CODEBUDDY_CONVERSATION_ID_MAP_MAX) || 1000,
+  authMode: (process.env.CODEBUDDY_AUTH_MODE || "auto").toLowerCase(),
+  apiKey: process.env.CODEBUDDY_API_KEY || "",
+  internetEnv: (
+    process.env.CODEBUDDY_INTERNET_ENVIRONMENT || "internal"
+  ).toLowerCase(),
+  apiEndpoint: process.env.CODEBUDDY_API_ENDPOINT || "",
+  apiKeyModels: (process.env.CODEBUDDY_MODELS || "claude-opus-4.6-1m")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
 };
 
 interface JwtPayload {
@@ -90,6 +100,63 @@ interface RemoteConfigResponse {
   };
 }
 
+type ApiKeyAuth = { type: "api"; key: string };
+type OAuthAuth = {
+  type: "oauth";
+  access: string;
+  refresh: string;
+  expires: number;
+};
+type AuthState = ApiKeyAuth | OAuthAuth;
+
+interface StoredAuth {
+  type?: string;
+  access?: string;
+  refresh?: string;
+  expires?: number;
+  key?: string;
+}
+
+function pickAuthMode(stored?: StoredAuth): "oauth" | "api" {
+  if (CONFIG.authMode === "api") return "api";
+  if (CONFIG.authMode === "oauth") return "oauth";
+  if (CONFIG.apiKey) return "api";
+  if (stored?.type === "api" && stored.key) return "api";
+  return "oauth";
+}
+
+function effectiveAuth(stored: StoredAuth | undefined): AuthState | null {
+  const mode = pickAuthMode(stored);
+  if (mode === "api") {
+    if (CONFIG.apiKey) return { type: "api", key: CONFIG.apiKey };
+    if (stored?.type === "api" && stored.key)
+      return { type: "api", key: stored.key };
+    return null;
+  }
+  if (
+    stored?.type === "oauth" &&
+    stored.access &&
+    typeof stored.expires === "number" &&
+    stored.expires > Date.now()
+  ) {
+    return {
+      type: "oauth",
+      access: stored.access,
+      refresh: stored.refresh || "",
+      expires: stored.expires,
+    };
+  }
+  if (stored?.type === "oauth" && stored.access) {
+    return {
+      type: "oauth",
+      access: stored.access,
+      refresh: stored.refresh || "",
+      expires: stored.expires || 0,
+    };
+  }
+  return null;
+}
+
 const DEFAULT_MODEL: RemoteModel = {
   id: "auto",
   name: "Auto",
@@ -131,8 +198,20 @@ class LRUMap<K, V> {
   }
 }
 
-let resolvedServerUrl = CONFIG.serverUrl;
-let resolvedDomain = CONFIG.domain;
+function resolveBaseUrl(): string {
+  if (CONFIG.apiEndpoint) return CONFIG.apiEndpoint.replace(/\/+$/, "");
+  if (CONFIG.internetEnv === "internal" || CONFIG.internetEnv === "ioa")
+    return "https://copilot.tencent.com";
+  return "https://www.codebuddy.ai";
+}
+
+function resolveDomainFromUrl(url: string): string {
+  if (url.includes("codebuddy.ai")) return "www.codebuddy.ai";
+  return "www.codebuddy.cn";
+}
+
+let resolvedServerUrl = resolveBaseUrl();
+let resolvedDomain = resolveDomainFromUrl(resolvedServerUrl);
 
 const sessionConversationIds = new LRUMap<string, string>(
   CONFIG.conversationIdMapMax,
@@ -304,13 +383,19 @@ function buildRequestHeaders(
   return headers;
 }
 
-function buildAuthHeaders(accessToken: string): Record<string, string> {
+function buildAuthHeaders(auth: AuthState): Record<string, string> {
+  if (auth.type === "api") {
+    return {
+      Authorization: `Bearer ${auth.key}`,
+      "X-API-Key": auth.key,
+    };
+  }
   const headers: Record<string, string> = {
-    Authorization: `Bearer ${accessToken}`,
+    Authorization: `Bearer ${auth.access}`,
   };
-  const tenantId = resolveTenantId(accessToken);
-  const enterpriseId = resolveEnterpriseId(accessToken);
-  const userId = resolveUserId(accessToken);
+  const tenantId = resolveTenantId(auth.access);
+  const enterpriseId = resolveEnterpriseId(auth.access);
+  const userId = resolveUserId(auth.access);
   if (tenantId) headers["X-Tenant-Id"] = tenantId;
   if (enterpriseId) headers["X-Enterprise-Id"] = enterpriseId;
   if (userId) headers["X-User-Id"] = userId;
@@ -480,47 +565,62 @@ export const CodeBuddyAuthPlugin: Plugin = async (input) => {
 
       let discovered: RemoteModel[] = [];
       let authAvailable = false;
+      const authPath = path.join(
+        os.homedir(),
+        ".local",
+        "share",
+        "opencode",
+        "auth.json",
+      );
+      let storedAuth: StoredAuth | undefined;
       try {
-        const home = os.homedir();
-        const authPath = path.join(
-          home,
-          ".local",
-          "share",
-          "opencode",
-          "auth.json",
-        );
         const raw = fs.readFileSync(authPath, "utf8");
-        const all = JSON.parse(raw) as Record<
-          string,
-          { type: string; access?: string }
-        >;
-        const auth = all[PROVIDER_ID];
-        if (auth?.type === "oauth" && auth.access) {
-          authAvailable = true;
-          const ac = new AbortController();
-          const timer = setTimeout(() => ac.abort(), DISCOVERY_TIMEOUT_MS);
-          const work = fetchRemoteModels(auth.access, ac.signal);
-          try {
-            discovered = await Promise.race([
-              work,
-              new Promise<RemoteModel[]>((resolve) =>
-                setTimeout(() => resolve([]), DISCOVERY_TIMEOUT_MS),
-              ),
-            ]);
-          } finally {
-            clearTimeout(timer);
-            ac.abort();
-          }
-        }
+        const all = JSON.parse(raw) as Record<string, StoredAuth>;
+        storedAuth = all[PROVIDER_ID];
       } catch {
         // auth not available yet, use fallback
       }
 
-      if (!authAvailable) {
+      const mode = pickAuthMode(storedAuth);
+      if (mode === "api") {
+        authAvailable = true;
         console.log(
-          "[codebuddy] no oauth token in ~/.local/share/opencode/auth.json — run `/connect codebuddy` to log in (falling back to auto model)",
+          "[codebuddy] api key mode — using CODEBUDDY_MODELS static list",
         );
-      } else if (discovered.length === 0) {
+        discovered = CONFIG.apiKeyModels.map((id) => ({
+          id,
+          name: id,
+          supportsToolCall: true,
+        }));
+      } else if (storedAuth?.type === "oauth" && storedAuth.access) {
+        authAvailable = true;
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), DISCOVERY_TIMEOUT_MS);
+        const work = fetchRemoteModels(storedAuth.access, ac.signal);
+        try {
+          discovered = await Promise.race([
+            work,
+            new Promise<RemoteModel[]>((resolve) =>
+              setTimeout(() => resolve([]), DISCOVERY_TIMEOUT_MS),
+            ),
+          ]);
+        } finally {
+          clearTimeout(timer);
+          ac.abort();
+        }
+      }
+
+      if (!authAvailable) {
+        if (mode === "api") {
+          console.log(
+            "[codebuddy] api key mode requested but no key found — set CODEBUDDY_API_KEY env or run `/connect codebuddy` (falling back to auto model)",
+          );
+        } else {
+          console.log(
+            `[codebuddy] no oauth token in ${authPath} — run \`/connect codebuddy\` to log in (falling back to auto model)`,
+          );
+        }
+      } else if (mode === "oauth" && discovered.length === 0) {
         console.log(
           "[codebuddy] no models discovered from /v3/config (auth may be expired — try `/connect codebuddy` to re-authenticate)",
         );
@@ -562,10 +662,14 @@ export const CodeBuddyAuthPlugin: Plugin = async (input) => {
               return fetch(url, init);
             }
 
-            const currentAuth = await getAuth();
-            if (currentAuth.type !== "oauth" || !currentAuth.access) {
+            const stored = (await getAuth()) as StoredAuth;
+            const auth = effectiveAuth(stored);
+            if (!auth) {
+              const mode = pickAuthMode(stored);
               throw new Error(
-                "codebuddy: missing oauth access token — run `/connect codebuddy` to log in",
+                mode === "api"
+                  ? "codebuddy: missing API key — set CODEBUDDY_API_KEY env or run `/connect codebuddy`"
+                  : "codebuddy: missing oauth access token — run `/connect codebuddy` to log in",
               );
             }
             if (!init?.body) {
@@ -578,13 +682,9 @@ export const CodeBuddyAuthPlugin: Plugin = async (input) => {
               );
             }
 
-            let accessToken = currentAuth.access;
-
-            const doRequest = async (token: string) => {
+            const doRequest = async (a: AuthState) => {
               const merged = new Headers(init?.headers);
-              for (const [k, v] of Object.entries(
-                buildAuthHeaders(token),
-              )) {
+              for (const [k, v] of Object.entries(buildAuthHeaders(a))) {
                 merged.set(k, v);
               }
               return fetch(
@@ -598,15 +698,17 @@ export const CodeBuddyAuthPlugin: Plugin = async (input) => {
               );
             };
 
-            let response = await doRequest(accessToken);
+            let response = await doRequest(auth);
+            let activeAuth = auth;
 
             if (
+              activeAuth.type === "oauth" &&
               (response.status === 401 || response.status === 403) &&
-              currentAuth.refresh
+              activeAuth.refresh
             ) {
               console.log("[codebuddy] Token expired, attempting refresh...");
               if (!refreshInFlight) {
-                refreshInFlight = refreshAccessToken(currentAuth.refresh).finally(
+                refreshInFlight = refreshAccessToken(activeAuth.refresh).finally(
                   () => {
                     refreshInFlight = null;
                   },
@@ -614,14 +716,19 @@ export const CodeBuddyAuthPlugin: Plugin = async (input) => {
               }
               const refreshed = await refreshInFlight;
               if (refreshed?.accessToken) {
-                accessToken = refreshed.accessToken;
                 const newExpires = refreshed.expiresIn
                   ? Date.now() + refreshed.expiresIn * 1000
                   : Date.now() + 24 * 60 * 60 * 1000;
+                activeAuth = {
+                  type: "oauth",
+                  access: refreshed.accessToken,
+                  refresh: refreshed.refreshToken || activeAuth.refresh,
+                  expires: newExpires,
+                };
                 const writeBody = {
                   type: "oauth" as const,
                   access: refreshed.accessToken,
-                  refresh: refreshed.refreshToken || currentAuth.refresh,
+                  refresh: refreshed.refreshToken || activeAuth.refresh,
                   expires: newExpires,
                 };
                 try {
@@ -635,7 +742,7 @@ export const CodeBuddyAuthPlugin: Plugin = async (input) => {
                     err,
                   );
                 }
-                response = await doRequest(accessToken);
+                response = await doRequest(activeAuth);
               }
             }
 
@@ -683,6 +790,23 @@ export const CodeBuddyAuthPlugin: Plugin = async (input) => {
                 };
               },
             };
+          },
+        },
+        {
+          label: "API Key 登录",
+          type: "api",
+          prompts: [
+            {
+              type: "text",
+              key: "key",
+              message: "请输入 CodeBuddy API Key（ck_xxx）",
+              placeholder: "ck_xxxxxxxxxxxxxxxx.xxxxx",
+            },
+          ],
+          async authorize(inputs) {
+            const key = inputs?.key?.trim();
+            if (!key) return { type: "failed" };
+            return { type: "success", key };
           },
         },
       ],
