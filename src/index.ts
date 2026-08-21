@@ -302,7 +302,7 @@ function decodeJwtPayload(token: string): JwtPayload | null {
   try {
     const parts = token.split(".");
     if (parts.length < 2) return null;
-    const payload = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const payload = parts[1]!.replace(/-/g, "+").replace(/_/g, "/");
     const pad = "=".repeat((4 - (payload.length % 4)) % 4);
     return JSON.parse(Buffer.from(payload + pad, "base64").toString("utf8"));
   } catch {

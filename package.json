@@ -1,13 +1,38 @@
 {
-  "name": "opencode-codebuddy-plugin",
-  "version": "1.0.3",
+  "name": "opencode-codebuddy-oauth",
+  "version": "2.0.0",
   "description": "OpenCode plugin for CodeBuddy (IOA) authentication",
   "type": "module",
-  "main": ".opencode/plugins/codebuddy.js",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
   "files": [
-    "dist",
-    ".opencode"
+    "dist"
   ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "prepublishOnly": "npm test && npm run build"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.18.0"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "1.18.0",
+    "@opencode-ai/sdk": "^1.0.0",
+    "@types/node": "^26.2.0",
+    "tsup": "latest",
+    "typescript": "^5.9.3",
+    "vitest": "latest"
+  },
   "keywords": [
     "opencode",
     "plugin",
