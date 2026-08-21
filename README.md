@@ -66,6 +66,26 @@ Only `chat.headers` and `chat.params` are gated on `input.model.providerID === "
 - An OpenCode install that loads plugins from `package.json`'s `dependencies` / `devDependencies` or from `~/.config/opencode/plugins/`.
 - The peer dependency `@opencode-ai/plugin` (also pinned under `devDependencies`).
 
+## Install (opencode plugin)
+
+```jsonc
+// ~/.config/opencode/opencode.json (recommended, npm git)
+{
+  "plugin": ["opencode-codebuddy-plugin@git+https://github.com/minglo/opencode-codebuddy-plugin.git"]
+}
+```
+
+`opencode` will auto-install via `@npmcli/arborist` (cached in `~/.cache/opencode/packages/`). No manual build needed — `.opencode/plugins/codebuddy.js` is self-contained (superpowers pattern), `package.json#main` points there, `exports["./server"]` ensures server entry survives missing `dist`.
+
+Alternative — local file plugin (no npm, works offline):
+
+```bash
+cp .opencode/plugins/codebuddy.js ~/.config/opencode/plugins/codebuddy.js
+# no opencode.json entry needed; files in ~/.config/opencode/plugins/*.js auto-load
+```
+
+Sync rule: `src/index.ts` is source of truth; `npm run build` compiles `tsc` → `dist/` and auto-syncs `dist/index.js` → `.opencode/plugins/codebuddy.js` via `scripts/sync-plugin.mjs`.
+
 ## Build
 
 ```bash
