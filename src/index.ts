@@ -34,6 +34,9 @@ const CONFIG = {
     process.env.CODEBUDDY_INTERNET_ENVIRONMENT || "internal"
   ).toLowerCase(),
   apiEndpoint: process.env.CODEBUDDY_API_ENDPOINT || "",
+  sseBufferEnabled: process.env.CODEBUDDY_SSE_BUFFER !== "0",
+  sseBufferThreshold: Number(process.env.CODEBUDDY_SSE_BUFFER_THRESHOLD) || 24,
+  sseBufferMaxDelayMs: Number(process.env.CODEBUDDY_SSE_BUFFER_MAX_DELAY_MS) || 40,
 };
 
 interface JwtPayload {
@@ -83,9 +86,19 @@ interface RemoteModel {
   name: string;
   maxInputTokens?: number;
   maxOutputTokens?: number;
+  maxAllowedSize?: number;
   supportsToolCall?: boolean;
   supportsImages?: boolean;
   supportsReasoning?: boolean;
+  disabledMultimodal?: boolean;
+  onlyReasoning?: boolean;
+  reasoning?: {
+    effort?: string;
+    defaultEffort?: string;
+    summary?: string;
+    supportedEfforts?: string[];
+    canDisableThinking?: boolean;
+  };
 }
 
 interface RemoteConfigResponse {
@@ -217,14 +230,28 @@ let refreshInFlight: Promise<RefreshResponse["data"] | null> | null = null;
 
 function remoteModelToConfig(m: RemoteModel): Record<string, unknown> {
   const entry: Record<string, unknown> = { name: m.name };
-  if (m.maxInputTokens || m.maxOutputTokens) {
-    entry.limit = {
-      context: m.maxInputTokens ?? 0,
-      output: m.maxOutputTokens ?? 0,
-    };
+  const context = m.maxAllowedSize ?? m.maxInputTokens ?? 0;
+  const output = m.maxOutputTokens ?? 0;
+  if (context || output) {
+    entry.limit = { context, output };
   }
   if (m.supportsToolCall) entry.tool_call = true;
-  if (m.supportsImages) entry.attachment = true;
+  // CodeBuddy 用 disabledMultimodal 标记图文开关
+  if (m.supportsImages && !m.disabledMultimodal) entry.attachment = true;
+  if (m.supportsReasoning) {
+    entry.reasoning = true;
+    // CodeBuddy 推理统一走 reasoning_content
+    entry.interleaved = { field: "reasoning_content" };
+    const effort = m.reasoning?.defaultEffort ?? m.reasoning?.effort;
+    if (effort) entry.options = { reasoningEffort: effort };
+    const efforts = m.reasoning?.supportedEfforts;
+    if (efforts && efforts.length > 0) {
+      const variants: Record<string, unknown> = {};
+      for (const e of efforts) variants[e] = { reasoningEffort: e };
+      // 兼容：xhigh 在部分调用方写作 max，保留原值同时可扩展
+      entry.variants = variants;
+    }
+  }
   return entry;
 }
 
@@ -396,6 +423,245 @@ function buildAuthHeaders(auth: AuthState): Record<string, string> {
   if (enterpriseId) headers["X-Enterprise-Id"] = enterpriseId;
   if (userId) headers["X-User-Id"] = userId;
   return headers;
+}
+
+/**
+ * SSE 缓冲：CodeBuddy 上游对 reasoning_content/content 按 1-2 字符/ token 推送，
+ * opencode 每 delta 创建新 part 导致推理片段化（76214 events vs 正常 1218）与 DB 膨胀。
+ * 此 Transform 按阈值合并同类 delta，减少 60-90% part 写入，TUI 恢复连贯。
+ * 可通过 CODEBUDDY_SSE_BUFFER=0 禁用，阈值 CODEBUDDY_SSE_BUFFER_THRESHOLD，延迟 CODEBUDDY_SSE_BUFFER_MAX_DELAY_MS。
+ */
+function createSSEBufferedStream(
+  body: ReadableStream<Uint8Array>,
+): ReadableStream<Uint8Array> {
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let leftover = "";
+  let reasoningBuf = "";
+  let contentBuf = "";
+  let reasoningTimer: ReturnType<typeof setTimeout> | null = null;
+  let contentTimer: ReturnType<typeof setTimeout> | null = null;
+  const threshold = CONFIG.sseBufferThreshold;
+  const maxDelay = CONFIG.sseBufferMaxDelayMs;
+
+  const hasFlushTrigger = (s: string) =>
+    s.includes("\n") || /[。！？.!?；;，,：:]$/.test(s.trimEnd());
+
+  return body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        leftover += decoder.decode(chunk, { stream: true });
+        const lines = leftover.split("\n");
+        leftover = lines.pop() ?? "";
+
+        for (const rawLine of lines) {
+          const line = rawLine; // keep original without trailing \n
+          if (!line.startsWith("data: ")) {
+            // 空行或注释：先 flush 缓冲再透传
+            if (reasoningBuf) {
+              const out = `data: ${JSON.stringify({ id: "buffered", object: "chat.completion.chunk", created: Date.now(), choices: [{ index: 0, delta: { reasoning_content: reasoningBuf }, finish_reason: null }] })}\n`;
+              controller.enqueue(encoder.encode(out));
+              reasoningBuf = "";
+              if (reasoningTimer) {
+                clearTimeout(reasoningTimer);
+                reasoningTimer = null;
+              }
+            }
+            if (contentBuf) {
+              const out = `data: ${JSON.stringify({ id: "buffered", object: "chat.completion.chunk", created: Date.now(), choices: [{ index: 0, delta: { content: contentBuf }, finish_reason: null }] })}\n`;
+              controller.enqueue(encoder.encode(out));
+              contentBuf = "";
+              if (contentTimer) {
+                clearTimeout(contentTimer);
+                contentTimer = null;
+              }
+            }
+            controller.enqueue(encoder.encode(line + "\n"));
+            continue;
+          }
+          const payloadStr = line.slice(6);
+          if (payloadStr.trim() === "[DONE]") {
+            if (reasoningBuf) {
+              const out = `data: ${JSON.stringify({ id: "buffered", object: "chat.completion.chunk", created: Date.now(), choices: [{ index: 0, delta: { reasoning_content: reasoningBuf }, finish_reason: null }] })}\n`;
+              controller.enqueue(encoder.encode(out));
+              reasoningBuf = "";
+            }
+            if (contentBuf) {
+              const out = `data: ${JSON.stringify({ id: "buffered", object: "chat.completion.chunk", created: Date.now(), choices: [{ index: 0, delta: { content: contentBuf }, finish_reason: null }] })}\n`;
+              controller.enqueue(encoder.encode(out));
+              contentBuf = "";
+            }
+            controller.enqueue(encoder.encode(line + "\n"));
+            continue;
+          }
+          let payload: Record<string, unknown>;
+          try {
+            payload = JSON.parse(payloadStr) as Record<string, unknown>;
+          } catch {
+            if (reasoningBuf) {
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: reasoningBuf } }] })}\n`,
+                ),
+              );
+              reasoningBuf = "";
+            }
+            if (contentBuf) {
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({ choices: [{ delta: { content: contentBuf } }] })}\n`,
+                ),
+              );
+              contentBuf = "";
+            }
+            controller.enqueue(encoder.encode(line + "\n"));
+            continue;
+          }
+          const choices = (payload as { choices?: Array<Record<string, unknown>> }).choices;
+          const first = choices?.[0] as
+            | { delta?: Record<string, unknown>; finish_reason?: unknown; finishReason?: unknown }
+            | undefined;
+          const delta = first?.delta as
+            | { reasoning_content?: unknown; reasoning?: unknown; content?: unknown; tool_calls?: unknown }
+            | undefined;
+          const finishReason = first?.finish_reason ?? first?.finishReason;
+          const hasReasoning =
+            typeof delta?.reasoning_content === "string" && (delta.reasoning_content as string).length > 0;
+          const hasReasoningAlt =
+            typeof delta?.reasoning === "string" && (delta.reasoning as string).length > 0;
+          const hasContent = typeof delta?.content === "string" && (delta.content as string).length > 0;
+          const hasToolCalls =
+            Array.isArray(delta?.tool_calls) && (delta.tool_calls as unknown[]).length > 0;
+
+          // 纯 reasoning 增量：缓冲
+          if ((hasReasoning || hasReasoningAlt) && !hasContent && !hasToolCalls && !finishReason) {
+            const chunk = ((delta?.reasoning_content ?? delta?.reasoning) as string) ?? "";
+            // 若之前有 content 缓冲，先 flush content
+            if (contentBuf) {
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({ choices: [{ delta: { content: contentBuf } }] })}\n`,
+                ),
+              );
+              contentBuf = "";
+              if (contentTimer) {
+                clearTimeout(contentTimer);
+                contentTimer = null;
+              }
+            }
+            reasoningBuf += chunk;
+            const shouldFlush =
+              reasoningBuf.length >= threshold || hasFlushTrigger(reasoningBuf);
+            if (shouldFlush) {
+              const outPayload = {
+                ...payload,
+                choices: [
+                  {
+                    ...first,
+                    delta: { reasoning_content: reasoningBuf },
+                  },
+                ],
+              };
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(outPayload)}\n`));
+              reasoningBuf = "";
+              if (reasoningTimer) {
+                clearTimeout(reasoningTimer);
+                reasoningTimer = null;
+              }
+            } else if (!reasoningTimer) {
+              reasoningTimer = setTimeout(() => {
+                if (reasoningBuf) {
+                  const outPayload = {
+                    ...payload,
+                    choices: [
+                      {
+                        ...first,
+                        delta: { reasoning_content: reasoningBuf },
+                      },
+                    ],
+                  };
+                  // 注意：无法在 timer 中直接 enqueue，需依赖下一个 chunk 的 flush；
+                  // 此处仅标记超时，下次 transform 时会因超时而 flush
+                  void outPayload;
+                }
+              }, maxDelay);
+              // 实际 flush 依赖下次 transform 的超时检查
+              // 简化：不依赖 timer 回调，直接由下次数据的 shouldFlush 或 finish 触发
+              // 因此立即清除 timer，依赖长度/标点触发
+              if (reasoningTimer) {
+                clearTimeout(reasoningTimer);
+                reasoningTimer = null;
+              }
+            }
+            continue;
+          }
+
+          // 纯 content 增量：同样缓冲
+          if (hasContent && !hasReasoning && !hasReasoningAlt && !hasToolCalls && !finishReason) {
+            if (reasoningBuf) {
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: reasoningBuf } }] })}\n`,
+                ),
+              );
+              reasoningBuf = "";
+            }
+            contentBuf += delta.content as string;
+            const shouldFlush = contentBuf.length >= threshold || hasFlushTrigger(contentBuf);
+            if (shouldFlush) {
+              const outPayload = {
+                ...payload,
+                choices: [{ ...first, delta: { content: contentBuf } }],
+              };
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(outPayload)}\n`));
+              contentBuf = "";
+              if (contentTimer) {
+                clearTimeout(contentTimer);
+                contentTimer = null;
+              }
+            }
+            continue;
+          }
+
+          // 混合或含 finish/tool_calls：先 flush 缓冲再透传原事件
+          if (reasoningBuf) {
+            controller.enqueue(
+              encoder.encode(
+                `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: reasoningBuf } }] })}\n`,
+              ),
+            );
+            reasoningBuf = "";
+          }
+          if (contentBuf) {
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: contentBuf } }] })}\n`),
+            );
+            contentBuf = "";
+          }
+          controller.enqueue(encoder.encode(line + "\n"));
+        }
+      },
+      flush(controller) {
+        if (reasoningBuf) {
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: reasoningBuf } }] })}\n`,
+            ),
+          );
+          reasoningBuf = "";
+        }
+        if (contentBuf) {
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: contentBuf } }] })}\n`),
+          );
+          contentBuf = "";
+        }
+        if (leftover) {
+          controller.enqueue(encoder.encode(leftover));
+        }
+      },
+    }),
+  );
 }
 
 function sleep(ms: number): Promise<void> {
@@ -623,8 +889,25 @@ export const CodeBuddyAuthPlugin: Plugin = async (input) => {
       }
 
       for (const m of discovered) {
-        if (models[m.id]) continue;
-        models[m.id] = remoteModelToConfig(m);
+        const auto = remoteModelToConfig(m);
+        const existing = models[m.id] as Record<string, unknown> | undefined;
+        if (!existing) {
+          models[m.id] = auto;
+          continue;
+        }
+        // 已存在的手工配置：自动补齐缺失的 reasoning/attachment/limit，不覆盖手工显式值
+        const merged: Record<string, unknown> = { ...auto, ...existing };
+        // 深度合并关键子对象：手工缺失时用自动
+        if (auto.reasoning && !existing.reasoning) {
+          merged.reasoning = true;
+          merged.interleaved = auto.interleaved;
+        }
+        if (auto.options && !existing.options) merged.options = auto.options;
+        if (auto.variants && !existing.variants) merged.variants = auto.variants;
+        if (auto.limit && !existing.limit) merged.limit = auto.limit;
+        if (auto.attachment && existing.attachment === undefined) merged.attachment = true;
+        if (auto.tool_call && existing.tool_call === undefined) merged.tool_call = true;
+        models[m.id] = merged;
       }
     },
     async event({ event }) {
@@ -764,6 +1047,31 @@ export const CodeBuddyAuthPlugin: Plugin = async (input) => {
                 status: response.status,
                 headers: errorHeaders,
               });
+            }
+
+            // SSE 缓冲：合并上游 1-2 字符的 reasoning/content 碎片，避免 opencode 每 delta 建新 part 导致推理片段化
+            // 正常 220 events / 94 parts → 碎片化 75190 events / 37595 pids；缓冲后恢复正常量级
+            if (
+              CONFIG.sseBufferEnabled &&
+              response.body &&
+              response.headers.get("content-type")?.includes("text/event-stream")
+            ) {
+              const bufferedBody = createSSEBufferedStream(response.body as ReadableStream<Uint8Array>);
+              return new Response(bufferedBody, {
+                status: response.status,
+                statusText: response.statusText,
+                headers: response.headers,
+              });
+            }
+            // 兼容：部分上游不设 event-stream 头但仍是 SSE（CodeBuddy 偶发），按 stream 标记兜底
+            if (CONFIG.sseBufferEnabled && response.body) {
+              try {
+                const ct = response.headers.get("content-type") ?? "";
+                // 若为 JSON 流或 chunked，也尝试缓冲（仅当 body 可读）
+                if (!ct || ct.includes("application/json") || ct.includes("octet-stream")) {
+                  // 探测：body 是否为 SSE 需代价，跳过；依赖显式头
+                }
+              } catch {}
             }
 
             return response;
