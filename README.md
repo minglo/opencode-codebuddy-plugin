@@ -7,7 +7,7 @@
 - **OAuth** — 走 IOA `/v2/plugin/auth/state` → 浏览器 → 轮询拿 token 流程。
 - **API Key** — 直接粘贴在 CodeBuddy 官网生成的 `ck_xxx` Key，模型通过 `opencode.json` 配置。
 
-> **2.0.0 为破坏性重设计**：env 变量全部重命名、baseURL 优先级反转，**无兼容层**，旧配置静默失效。升级前请阅读[迁移指南](#迁移指南-v1--v2)。
+> **2.0.0 为破坏性重设计**：env 变量重命名 9 项、baseURL 优先级反转，**无兼容层**，旧配置静默失效。升级前请阅读[迁移指南](#迁移指南-v1--v2)。
 
 ---
 
@@ -22,7 +22,7 @@
 }
 ```
 
-> 已通过 npm 发布，无需 `file:` / `git:` 引用。环境要求：Node.js ≥ 18，OpenCode ≥ 1.18.0（peer 依赖 `@opencode-ai/plugin`）。
+> 已构建待发布：`npm publish` 后即可直接以包名 `opencode-codebuddy-oauth` 安装；发布前如需本地验证，请使用 `file:` / `git:` 引用。环境要求：Node.js ≥ 18，OpenCode ≥ 1.18.0（peer 依赖 `@opencode-ai/plugin`）。
 
 ## 快速开始
 
