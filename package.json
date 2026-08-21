@@ -12,7 +12,8 @@
   },
   "scripts": {
     "build": "tsc && node scripts/sync-plugin.mjs",
-    "prepublishOnly": "tsc && node scripts/sync-plugin.mjs"
+    "prepublishOnly": "tsc && node scripts/sync-plugin.mjs",
+    "prepare": "echo prepare ok"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "^1.18.20",
