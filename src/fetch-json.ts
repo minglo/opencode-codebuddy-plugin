@@ -11,8 +11,8 @@ function withTimeout(ms: number, external?: AbortSignal) {
 }
 export async function fetchJson<T>(url: string, opts: { method?: string; headers?: Record<string,string>; body?: string; timeoutMs: number; signal?: AbortSignal }) {
   const t = withTimeout(opts.timeoutMs, opts.signal);
-  if (t.signal.aborted) return { ok: false as const, text: "timeout or abort" };
   try {
+    if (t.signal.aborted) return { ok: false as const, text: "timeout or abort" };
     const res = await Promise.race([
       fetch(url, { method: opts.method, headers: opts.headers, body: opts.body, signal: t.signal }),
       new Promise<never>((_, reject) => t.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true })),
