@@ -4,23 +4,10 @@
   "description": "OpenCode plugin for CodeBuddy (IOA) authentication",
   "type": "module",
   "main": ".opencode/plugins/codebuddy.js",
-  "types": "./dist/index.d.ts",
-  "exports": {
-    ".": "./dist/index.js",
-    "./server": "./.opencode/plugins/codebuddy.js",
-    "./dist": "./dist/index.js"
-  },
-  "scripts": {
-    "build": "tsc && node scripts/sync-plugin.mjs",
-    "prepublishOnly": "tsc && node scripts/sync-plugin.mjs",
-    "prepare": "echo prepare ok"
-  },
-  "devDependencies": {
-    "@opencode-ai/plugin": "^1.18.20",
-    "@types/node": "^26.2.0",
-    "typescript": "5.8.3"
-  },
-  "license": "MIT",
+  "files": [
+    "dist",
+    ".opencode"
+  ],
   "keywords": [
     "opencode",
     "plugin",
@@ -28,8 +15,5 @@
     "ioa",
     "authentication"
   ],
-  "files": [
-    "dist",
-    ".opencode"
-  ]
+  "license": "MIT"
 }
