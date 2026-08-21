@@ -3,10 +3,11 @@
   "version": "1.0.3",
   "description": "OpenCode plugin for CodeBuddy (IOA) authentication",
   "type": "module",
-  "main": "./dist/index.js",
+  "main": ".opencode/plugins/codebuddy.js",
   "types": "./dist/index.d.ts",
   "exports": {
-    "./server": "./dist/index.js"
+    "./server": "./dist/index.js",
+    ".": "./dist/index.js"
   },
   "scripts": {
     "build": "tsc",
@@ -29,6 +30,7 @@
     "authentication"
   ],
   "files": [
-    "dist"
+    "dist",
+    ".opencode"
   ]
 }
