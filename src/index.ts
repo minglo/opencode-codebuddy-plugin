@@ -27,10 +27,11 @@ export const CodeBuddyAuthPlugin: Plugin = async (input: PluginInput) => {
   return {
     async config(config: any) {
       // baseURL 兜底覆写（设计 5.1 优先级链：ENDPOINT > NETWORK > baseURL > 默认）
-      // 仅当 ENDPOINT 未设置（NETWORK 缺省 internal，无法区分未设置）时才用 provider.options.baseURL 覆写 server（破坏性反转）
+      // 仅当 ENDPOINT 未设置且 NETWORK 缺省（internal）时才用 provider.options.baseURL 覆写 server
+      // （NETWORK=internet/ioa 时 NETWORK 优先于 baseURL，不覆写；NETWORK 缺省即 internal，无法区分显式设置）
       const opts = (config.provider?.[PROVIDER_ID]?.options || {}) as Record<string, unknown>;
       const configuredBase = typeof opts.baseURL === "string" ? opts.baseURL : undefined;
-      if (!cfg.endpoint) {
+      if (!cfg.endpoint && cfg.network === "internal") {
         if (configuredBase) {
           try {
             const u = new URL(configuredBase);
@@ -121,7 +122,7 @@ export const CodeBuddyAuthPlugin: Plugin = async (input: PluginInput) => {
             resolveIdentity: resolveIdentity as any,
             decodeJwtPayload: decodeJwtPayload as any,
             createSSEBufferedStream: createSSEBufferedStream as any,
-            refreshLock, cfg: cfg as any,
+            refreshLock, cfg: cfg as any, logger,
             effectiveAuth: ((stored: unknown) => effectiveAuth(stored as any, cfg as any)) as any,
             pickAuthMode: ((stored: unknown) => pickAuthMode(cfg, stored as any)) as any,
             refreshAccessToken,
@@ -135,7 +136,7 @@ export const CodeBuddyAuthPlugin: Plugin = async (input: PluginInput) => {
           const expiresAt = Date.now() + 10*60*1000;
           return { url: state.url, instructions: "请在浏览器中完成 IOA 登录", method: "auto" as const,
             async callback() {
-              const tok = await pollForToken(state.state, expiresAt);
+              const tok = await pollForToken(server.url, state.state, expiresAt);
               if (!tok) return { type:"failed" as const };
               return { type:"success" as const, access: tok.accessToken, refresh: tok.refreshToken || "", expires: tok.expiresIn ? Date.now()+tok.expiresIn*1000 : Date.now()+24*60*60*1000 };
             } };

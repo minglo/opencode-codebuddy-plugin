@@ -28,13 +28,13 @@ export async function requestAuthState(serverUrl:string): Promise<{ state:string
   return { state, url: authUrl };
 }
 
-export async function pollForToken(state:string, expiresAt:number, signal?:AbortSignal): Promise<{accessToken:string; refreshToken?:string; expiresIn?:number}|null> {
+export async function pollForToken(serverUrl:string, state:string, expiresAt:number, signal?:AbortSignal): Promise<{accessToken:string; refreshToken?:string; expiresIn?:number}|null> {
   // 先查后睡：首次立即查，失败后 sleep 再查
   while (Date.now() < expiresAt) {
     if (signal?.aborted) return null;
     // 本轮先查
     const res = await fetchJson<{code:number; data?:{accessToken:string; refreshToken?:string; expiresIn?:number}}>(
-      `https://copilot.tencent.com/v2/plugin/auth/token?state=${state}`,
+      `${serverUrl}/v2/plugin/auth/token?state=${state}`,
       { method:"GET", headers:{ Accept:"application/json", "X-No-Authorization":"true", "X-No-User-Id":"true", "X-No-Enterprise-Id":"true", "X-No-Department-Info":"true" }, timeoutMs: POLL_TIMEOUT_MS, signal },
     );
     if (res.ok && res.data.code===0 && res.data.data?.accessToken) return res.data.data;

@@ -63,26 +63,31 @@ describe("pollForToken 先查后睡", () => {
   it("首查即成功时不 sleep 3s（计时）", async () => {
     vi.mocked(fetchJson).mockResolvedValue({ ok:true, data:{ code:0, data:{ accessToken:"a", refreshToken:"r", expiresIn:3600 } } } as any);
     const start = Date.now();
-    const res = await pollForToken("s1", Date.now()+10000);
+    const res = await pollForToken("https://copilot.tencent.com", "s1", Date.now()+10000);
     expect(res?.accessToken).toBe("a");
     expect(Date.now() - start).toBeLessThan(1000);
     expect(vi.mocked(fetchJson)).toHaveBeenCalledTimes(1);
   });
+  it("自定义 server 时 URL 跟随 serverUrl（非硬编码默认主机）", async () => {
+    vi.mocked(fetchJson).mockResolvedValue({ ok:true, data:{ code:0, data:{ accessToken:"a" } } } as any);
+    await pollForToken("https://my-proxy.example.com", "s1", Date.now()+10000);
+    expect(vi.mocked(fetchJson).mock.calls[0][0]).toBe("https://my-proxy.example.com/v2/plugin/auth/token?state=s1");
+  });
   it("首查失败后才 sleep 再查", async () => {
     vi.mocked(fetchJson).mockResolvedValueOnce({ ok:true, data:{ code:1, data:{} } } as any)
       .mockResolvedValueOnce({ ok:true, data:{ code:0, data:{ accessToken:"a", refreshToken:"r", expiresIn:3600 } } } as any);
-    const res = await pollForToken("s1", Date.now()+5000);
+    const res = await pollForToken("https://copilot.tencent.com", "s1", Date.now()+5000);
     expect(res?.accessToken).toBe("a");
     expect(vi.mocked(fetchJson)).toHaveBeenCalledTimes(2);
   });
   it("signal 中止时立即返回 null", async () => {
     const ac = new AbortController(); ac.abort();
-    const res = await pollForToken("s1", Date.now()+10000, ac.signal);
+    const res = await pollForToken("https://copilot.tencent.com", "s1", Date.now()+10000, ac.signal);
     expect(res).toBeNull();
   });
   it("expiresAt 到期返回 null", async () => {
     vi.mocked(fetchJson).mockResolvedValue({ ok:true, data:{ code:1 } } as any);
-    const res = await pollForToken("s1", Date.now()+10);
+    const res = await pollForToken("https://copilot.tencent.com", "s1", Date.now()+10);
     expect(res).toBeNull();
   });
 });

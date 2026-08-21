@@ -51,6 +51,15 @@ describe("index config hook 全量", () => {
     expect(cfg.provider.codebuddy.options.baseURL).toBe("https://env.example.com/v2");
     delete process.env.CODEBUDDY_ENDPOINT;
   });
+  it("NETWORK=internet 时 baseURL 不覆写（NETWORK 优先于 baseURL）", async () => {
+    delete process.env.CODEBUDDY_ENDPOINT;
+    process.env.CODEBUDDY_NETWORK = "internet";
+    const plugin = await CodeBuddyAuthPlugin({ client: { app:{ log: vi.fn().mockResolvedValue(undefined) } } } as any);
+    const cfg: any = { provider: { codebuddy: { options:{ baseURL:"https://base.example.com/v2" } } } };
+    await plugin.config!(cfg);
+    expect(cfg.provider.codebuddy.options.baseURL).toBe("https://www.codebuddy.ai/v2");
+    delete process.env.CODEBUDDY_NETWORK;
+  });
   it("oauth discovery 401/403 不降级 DEFAULT_MODEL（warn + 不注入 models.auto）", async () => {
     const readFile = vi.mocked(fs.promises.readFile as any);
     readFile.mockResolvedValueOnce(JSON.stringify({ codebuddy: { type:"oauth", access:"expired", refresh:"r", expires: 0 } }));

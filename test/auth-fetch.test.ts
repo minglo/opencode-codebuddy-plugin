@@ -74,7 +74,7 @@ describe("auth-fetch", () => {
     const lock = new RefreshLock();
     (globalThis as any).fetch = async () => new Response("unauth", { status: 401 });
     const af = createAuthFetch(makeDeps({
-      getAuth: async () => ({ type:"oauth", access:"a", refresh:"r", expires: 0 }),
+      getAuth: async () => ({ type:"oauth", access:"a", refresh:"r", expires: Date.now() + 3600*1000 }),
       refreshLock: lock,
       refreshAccessToken: async () => { calls++; return { accessToken:"new", refreshToken:"r2", expiresIn:3600 }; },
     } as any));
@@ -83,5 +83,59 @@ describe("auth-fetch", () => {
       af("https://x/v2/chat/completions", { method:"POST", body: JSON.stringify({stream:true}) } as any).catch(()=>{}),
     ]);
     expect(calls).toBe(1);
+  });
+  it("A4 预刷新：expires 逼近（skew 内）时请求前刷新并用新 token", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    (globalThis as any).fetch = fetchSpy;
+    const refreshSpy = vi.fn().mockResolvedValue({ accessToken:"pre-new", refreshToken:"r2", expiresIn:3600 });
+    const setSpy = vi.fn().mockResolvedValue(undefined);
+    const af = createAuthFetch(makeDeps({
+      getAuth: async () => ({ type:"oauth", access:"old", refresh:"r", expires: Date.now() - 1000 }),
+      client: { auth: { set: setSpy } },
+      buildAuthHeaders: (a: any) => ({ Authorization: `Bearer ${a.access}` }),
+      refreshAccessToken: refreshSpy,
+    } as any));
+    await af("https://x/v2/chat/completions", { method:"POST", body: JSON.stringify({stream:true}) } as any);
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
+    expect(setSpy).toHaveBeenCalledWith(expect.objectContaining({ body: expect.objectContaining({ access:"pre-new" }) }));
+    const sent = new Headers(fetchSpy.mock.calls[0][1].headers);
+    expect(sent.get("Authorization")).toBe("Bearer pre-new");
+  });
+  it("A4 预刷新失败（refresh 返回 null）时沿用旧 token 发起请求（不阻断）", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    (globalThis as any).fetch = fetchSpy;
+    const refreshSpy = vi.fn().mockResolvedValue(null);
+    const af = createAuthFetch(makeDeps({
+      getAuth: async () => ({ type:"oauth", access:"old", refresh:"r", expires: Date.now() - 1000 }),
+      buildAuthHeaders: (a: any) => ({ Authorization: `Bearer ${a.access}` }),
+      refreshAccessToken: refreshSpy,
+    } as any));
+    await af("https://x/v2/chat/completions", { method:"POST", body: JSON.stringify({stream:true}) } as any);
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
+    const sent = new Headers(fetchSpy.mock.calls[0][1].headers);
+    expect(sent.get("Authorization")).toBe("Bearer old");
+  });
+  it("A4 预刷新：expires 未逼近（skew 外）不刷新", async () => {
+    const refreshSpy = vi.fn().mockResolvedValue({ accessToken:"new", expiresIn:3600 });
+    (globalThis as any).fetch = async () => new Response("ok", { status: 200 });
+    const af = createAuthFetch(makeDeps({
+      getAuth: async () => ({ type:"oauth", access:"a", refresh:"r", expires: Date.now() + 24*60*60*1000 }),
+      refreshAccessToken: refreshSpy,
+    } as any));
+    await af("https://x/v2/chat/completions", { method:"POST", body: JSON.stringify({stream:true}) } as any);
+    expect(refreshSpy).not.toHaveBeenCalled();
+  });
+  it("client.auth.set 写回失败记 error 日志（logger 注入）", async () => {
+    const errorSpy = vi.fn();
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: errorSpy };
+    (globalThis as any).fetch = async () => new Response("ok", { status: 200 });
+    const af = createAuthFetch(makeDeps({
+      getAuth: async () => ({ type:"oauth", access:"old", refresh:"r", expires: Date.now() - 1000 }),
+      client: { auth: { set: async () => { throw new Error("write denied"); } } },
+      logger: logger as any,
+      refreshAccessToken: async () => ({ accessToken:"new", expiresIn:3600 }),
+    } as any));
+    await af("https://x/v2/chat/completions", { method:"POST", body: JSON.stringify({stream:true}) } as any);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("write-back failed"));
   });
 });
