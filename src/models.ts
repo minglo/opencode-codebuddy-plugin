@@ -32,7 +32,7 @@ export async function fetchRemoteModels(
     return [];
   }
   const body = res.data;
-  if (body.code !== 0 || !body.data) return [];
+  if (!body || body.code !== 0 || !body.data) return [];
   const allModels = body.data.models || [];
   const modelMap = new Map(allModels.map((m) => [m.id, m]));
   const craftAgent = (body.data.agents || []).find((a) => a.name === AGENT_INTENT);
@@ -80,7 +80,7 @@ export class DiscoveryCache {
       if (!this.data) { this.data = [DEFAULT_MODEL]; this.fetchedAt = now; return this.data; }
       return this.data;
     }).finally(() => { this.inflight = null; });
-    if (this.data) return this.data;
+    if (this.data) { this.inflight.catch(() => {}); return this.data; }
     return this.inflight;
   }
 }

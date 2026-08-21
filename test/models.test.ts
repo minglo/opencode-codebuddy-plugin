@@ -67,6 +67,26 @@ describe("DiscoveryCache", () => {
     await cache.get("tok", { signal: undefined });
     expect(fetch2).toHaveBeenCalled();
   });
+  it("SWR 过期分支 401 不产生 unhandled rejection", async () => {
+    const unhandled: unknown[] = [];
+    const onU = (e: unknown) => unhandled.push(e);
+    process.on("unhandledRejection", onU);
+    try {
+      const fetch = vi.fn()
+        .mockResolvedValueOnce([{ id:"m1", name:"M1" }])
+        .mockRejectedValueOnce(Object.assign(new Error("401"), { status:401 }));
+      const cache = new DiscoveryCache({ ttlMs: 10, fetchFn: fetch, server:{ url:"https://x", domain:"d" } } as any);
+      const first = await cache.get("tok", { signal: undefined });
+      expect(first[0].id).toBe("m1");
+      await new Promise(r => setTimeout(r, 20));
+      const second = await cache.get("tok", { signal: undefined });
+      expect(second[0].id).toBe("m1");
+      await new Promise(r => setTimeout(r, 50));
+      expect(unhandled).toHaveLength(0);
+    } finally {
+      process.removeListener("unhandledRejection", onU);
+    }
+  });
   it("DEFAULT_MODEL 字段定稿", () => {
     expect(DEFAULT_MODEL).toEqual({ id:"auto", name:"Auto", maxInputTokens:168000, maxOutputTokens:32000, supportsToolCall:true });
   });
