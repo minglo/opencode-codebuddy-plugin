@@ -211,7 +211,7 @@ DiscoveryCache（修 D2）：内存 `{ data, fetchedAt }`，TTL 5min。config() 
 - `flushBuf(controller, field)` 收敛 ×8 处 JSON 模板（C1），输出统一完整格式：`{ id:"buffered", object:"chat.completion.chunk", created, choices:[{index:0, delta:{[field]:buf}, finish_reason:null}] }`
 - `flush()` 清双 timer + 冲剩余 buffer + leftover
 - leftover 用数组收集 join（修 D5 O(n²)）
-- `FLUSH_RE = /[。！？.!?；;，,：:]$/` 模块级预编译（修 D8）
+- `FLUSH_RE = /[。！？.!?；;，,：:]$/` 模块级预编译（修 D8）；`hasFlushTrigger` 去掉每次调用的 `s.trimEnd()` 分配——SSE delta 末尾即有效字符，直接对原串匹配末尾标点
 
 ### 5.11 index.ts 组装
 
@@ -237,14 +237,17 @@ DiscoveryCache（修 D2）：内存 `{ data, fetchedAt }`，TTL 5min。config() 
 - tsconfig：`strict` + `verbatimModuleSyntax` + `noUncheckedIndexedAccess`，target ES2023
 - peerDependencies：`@opencode-ai/plugin` 下限以 devDeps 实际安装版本为准
 - version 2.0.0；README 重写：安装（opencode.json plugin 数组）、配置（新 env 表）、迁移指南（旧→新 env 映射表）
+- repo 内 `.opencode/` 仅作本项目本地开发加载用途（旧 sync-plugin.mjs 机制已废），不进 npm 包（`files: ["dist"]` 已排除）
 
 ## 8. 测试计划（vitest）
 
 | 文件 | 用例 |
 |---|---|
-| sse-buffer | 碎片合并至 threshold；标点触发；maxDelay 定时冲出；类型切换先冲再透传；finish/tool_calls 直通；`[DONE]` 前冲空缓冲；多字节 UTF-8 跨包；非 data 行透传；flush 冲剩余 |
+| sse-buffer | 碎片合并至 threshold；标点触发；maxDelay 定时冲出；定时回调在流关闭后不抛（try/catch 路径）；类型切换先冲再透传；finish/tool_calls 直通；`[DONE]` 前冲空缓冲；多字节 UTF-8 跨包；非 data 行透传；flush 冲剩余 |
 | jwt | 各 claim 变体（tenant_id/tenantId/ent_id…iss realm 提取）；畸形 token 返回 null |
+| config | num() 吞 0 回归（threshold=0 / mapMax=0 / maxDelayMs=0 均生效）；布尔 env `0`=禁用；resolveServerUrl 三分支 |
 | auth-state | 模式选择矩阵（env/stored 组合）；A2 无 key 警告路径；effectiveAuth 单分支；needsRefresh 边界（恰在 skew 内/外）；parseStoredAuth 对损坏输入容错 |
+| auth-flow | RefreshLock 并发去重（同 token 单飞、异 token 互阻）；预刷新触发路径（skew 内先刷再发）；pollForToken 先查后睡顺序；401 兜底刷新 |
 | models | 映射全字段快照；N1 tool_call:false 落盘；N2 手工 reasoning:false 不被翻转；merge 子对象深合并；craft 过滤 |
 | lru | 淘汰顺序；命中提升；容量 0 |
 | fetch-json | 超时中止；外部 signal 联动；非 2xx 返回 status/text |
