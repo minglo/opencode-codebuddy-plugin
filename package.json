@@ -14,9 +14,6 @@
     "build": "tsc && node scripts/sync-plugin.mjs",
     "prepublishOnly": "tsc && node scripts/sync-plugin.mjs"
   },
-  "peerDependencies": {
-    "@opencode-ai/plugin": ">=0.1.0"
-  },
   "devDependencies": {
     "@opencode-ai/plugin": "^1.18.20",
     "@types/node": "^26.2.0",
