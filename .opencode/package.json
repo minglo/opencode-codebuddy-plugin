@@ -1,4 +1,5 @@
 {
   "name": "opencode-codebuddy-plugin-wrapper",
-  "private": true
+  "private": true,
+  "type": "module"
 }

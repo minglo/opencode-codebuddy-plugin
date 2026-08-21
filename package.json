@@ -6,20 +6,21 @@
   "main": ".opencode/plugins/codebuddy.js",
   "types": "./dist/index.d.ts",
   "exports": {
-    "./server": "./dist/index.js",
-    ".": "./dist/index.js"
+    ".": "./dist/index.js",
+    "./server": "./.opencode/plugins/codebuddy.js",
+    "./dist": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsc",
-    "prepublishOnly": "tsc"
+    "build": "tsc && node scripts/sync-plugin.mjs",
+    "prepublishOnly": "tsc && node scripts/sync-plugin.mjs"
   },
   "peerDependencies": {
     "@opencode-ai/plugin": ">=0.1.0"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "latest",
-    "@types/node": "^25.6.0",
-    "typescript": "^5.8.0"
+    "@opencode-ai/plugin": "^1.18.20",
+    "@types/node": "^26.2.0",
+    "typescript": "5.8.3"
   },
   "license": "MIT",
   "keywords": [
