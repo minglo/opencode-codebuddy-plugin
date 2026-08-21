@@ -1,216 +1,173 @@
-# opencode-codebuddy-plugin
+# opencode-codebuddy-oauth
 
-OpenCode plugin that wires [CodeBuddy](https://www.codebuddy.cn) (a.k.a. **IOA**, Tencent's coding agent) into OpenCode as an authenticated provider. It implements the six OpenCode plugin hooks required to authenticate, model-discover, and proxy chat-completions requests against the CodeBuddy API.
+为 [CodeBuddy](https://www.codebuddy.cn)（即 **IOA**，腾讯编程助手）提供 OpenCode 插件，将 CodeBuddy 作为已认证 provider 接入 OpenCode。
 
-Supports **two authentication modes**:
+支持 **两种鉴权模式**：
 
-- **OAuth** — runs the IOA `/v2/plugin/auth/state` → browser → poll flow.
-- **API Key** — paste a `ck_xxx` CodeBuddy API Key generated from the CodeBuddy website; models are configured in `opencode.json`.
+- **OAuth** — 走 IOA `/v2/plugin/auth/state` → 浏览器 → 轮询拿 token 流程。
+- **API Key** — 直接粘贴在 CodeBuddy 官网生成的 `ck_xxx` Key，模型通过 `opencode.json` 配置。
 
-> Source is a single file: [`src/index.ts`](./src/index.ts). The build artifact is `dist/index.js`.
-
----
-
-## Features
-
-- **OAuth login** — runs the IOA `/v2/plugin/auth/state` → browser → poll flow directly from your editor.
-- **API Key login** — paste a `ck_xxx` key at `/connect codebuddy`; no browser flow, no token polling, no refresh.
-- **Automatic model discovery** — calls `GET /v3/config` at startup (OAuth mode) and populates `provider.codebuddy.models` with every craft-agent model that supports tool calls. In API Key mode, models are read from `opencode.json` configuration (user must declare models with `limit` to enable usage% display).
-- **Token auto-refresh on 401/403** — the custom `fetch` interceptor catches auth failures (OAuth only), calls `/v2/plugin/auth/token/refresh`, writes the new token back to `auth.json`, and retries the request once.
-- **Stable per-session `X-Conversation-ID`** — promotes the upstream prompt cache by reusing the same conversation UUID for every turn within an OpenCode session (cleared on `session.compacted` / `session.deleted`).
-- **Environment switch** — the same plugin serves `copilot.tencent.com` (CN, default) and `www.codebuddy.ai` (international); switchable via `CODEBUDDY_INTERNET_ENVIRONMENT` or by setting `CODEBUDDY_API_ENDPOINT` directly.
+> **2.0.0 为破坏性重设计**：env 变量全部重命名、baseURL 优先级反转，**无兼容层**，旧配置静默失效。升级前请阅读[迁移指南](#迁移指南-v1--v2)。
 
 ---
 
-## Architecture
+## 安装
 
-The plugin implements six OpenCode hooks. Requests flow through them in this order:
+在项目（或全局 `~/.config/opencode/opencode.json`）的 `plugin` 数组中声明本插件：
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["opencode-codebuddy-oauth"]
+}
+```
+
+> 已通过 npm 发布，无需 `file:` / `git:` 引用。环境要求：Node.js ≥ 18，OpenCode ≥ 1.18.0（peer 依赖 `@opencode-ai/plugin`）。
+
+## 快速开始
+
+启动 OpenCode 后运行：
+
+- **`/connect codebuddy`** → 选择 **IOA 登录 (浏览器)**，按提示在浏览器中完成 IOA 认证（OAuth 模式）。
+- **`/connect codebuddy`** → 选择 **API Key 登录**，粘贴 `ck_xxx` Key（API Key 模式）。
+
+插件会自动创建 `codebuddy` provider、发现模型（OAuth 模式）。开箱即用，无需额外配置。
+
+---
+
+## 特性
+
+- **OAuth 登录** — 直接在编辑器内走 IOA 流程：`/v2/plugin/auth/state` → 浏览器 → 轮询拿 token。
+- **API Key 登录** — 在 `/connect codebuddy` 处粘贴 `ck_xxx` Key；无需浏览器、不轮询、不刷新。
+- **自动模型发现** — OAuth 模式启动时调用 `GET /v3/config`（带 5 分钟 TTL 缓存 + 并发单飞去重），把支持 tool call 的 craft agent 模型写入 `provider.codebuddy.models`；API Key 模式下模型从 `opencode.json` 配置读取。
+- **401/403 自动刷新 token** — 自定义 `fetch` 拦截器捕获鉴权失败（仅 OAuth 模式），调 `/v2/plugin/auth/token/refresh` 拿新 token，写回 `auth.json` 后重试一次；`RefreshLock` 按 provider 单例去重并发刷新。过期 token 在请求发出前预刷新（5 分钟 skew），避免浪费 RTT。
+- **SSE 缓冲** — 流式响应按阈值/换行/标点/最大延迟合并分块输出，降低 UI 渲染频率；`reasoning_content` 与 `content` 混排保留。
+- **session 级 `X-Conversation-ID` 稳定化** — 同一个 OpenCode session 内所有请求复用同一 UUID，跨 turn、跨 tool call 一致，提升上游 prompt cache 命中率（`session.compacted` / `session.deleted` 时清掉 LRU 条目）。
+- **环境自动切换** — 同一份插件同时支持 `copilot.tencent.com`（国内版，默认）和 `www.codebuddy.ai`（国际版）；可通过 `CODEBUDDY_NETWORK` 切换，或直接用 `CODEBUDDY_ENDPOINT` 覆盖完整 URL。
+
+---
+
+## 架构
+
+插件实现 4 个 OpenCode hook：
+
+| Hook | 作用 |
+| ---- | ---- |
+| `config` | 注入 `codebuddy` provider（如缺失），解析服务器地址（含 baseURL 兜底覆写），OAuth 模式下用 `/v3/config` 填充 `models`。 |
+| `event` | 监听 `session.compacted` / `session.deleted`，淘汰对应的 conversationId LRU 条目。 |
+| `auth.loader` | 返回 `{ apiKey, baseURL, fetch }`；自定义 `fetch` 注入认证信息、处理 401/403 刷新重试、包装 SSE 缓冲。提供 `/connect` 的 OAuth 与 API Key 两种登录方法。 |
+| `chat.headers` | 注入非认证 headers（`X-Conversation-ID`、B3、`X-Model-ID` 等），仅 `providerID === "codebuddy"` 时生效。 |
+
+请求流：
 
 ```
-OpenCode collects user input
-  │
-  ▼  chat.message
-warm up session → ensure conversationId is in the LRU
+OpenCode 收集用户输入
   │
   ▼  chat.headers
-inject non-auth headers (X-Conversation-ID, B3, X-Model-ID, …)
-  │
-  ▼  chat.params
-override baseURL
+注入非认证 headers（X-Conversation-ID / B3 / X-Model-ID 等）
   │
   ▼  auth.loader.fetch
-layer in Authorization / X-Tenant-Id / X-User-Id / X-Enterprise-Id,
-forward to ${serverUrl}/v2/chat/completions,
-and on 401/403 refresh the token and retry once
+叠加 Authorization / X-Tenant-Id / X-User-Id / X-Enterprise-Id，
+转发到 ${serverUrl}/v2/chat/completions，
+401/403 则刷新 token 后重试一次，SSE 流式响应经缓冲器输出
   │
-  ▼  upstream CodeBuddy API
+  ▼  上游 CodeBuddy API
 ```
 
-| Hook             | Purpose                                                                                          |
-| ---------------- | ------------------------------------------------------------------------------------------------ |
-| `config`       | Auto-injects the`codebuddy` provider if missing, then enriches `models` from `/v3/config`. |
-| `event`        | Listens for`session.compacted` / `session.deleted` and evicts the corresponding LRU entry.   |
-| `chat.message` | Pre-warms the conversationId LRU for the new session.                                            |
-| `chat.headers` | Sets non-auth headers (`X-Conversation-ID`, `B3`, `X-Model-ID`, …).                       |
-| `auth.loader`  | Returns`{ apiKey, baseURL, fetch }`; the custom `fetch` injects auth and handles 401/403.    |
-| `chat.params`  | Overrides`options.baseURL` to the resolved server URL.                                         |
-
-Only `chat.headers` and `chat.params` are gated on `input.model.providerID === "codebuddy"`.
+源码为分层纯核 + 薄胶水：`src/index.ts` 仅接线，核心逻辑在 `config.ts` / `auth-state.ts` / `auth-flow.ts` / `auth-fetch.ts` / `models.ts` / `headers.ts` / `sse-buffer.ts` / `jwt.ts` / `lru.ts` / `fetch-json.ts` 等独立模块（vitest 全覆盖）。
 
 ---
 
-## Requirements
+## 环境变量
 
-- Node.js ≥ 18 (ESM, `target: ES2022`, `module: NodeNext`).
-- A working `tsc` toolchain.
-- An OpenCode install that loads plugins from `package.json`'s `dependencies` / `devDependencies` or from `~/.config/opencode/plugins/`.
-- The peer dependency `@opencode-ai/plugin` (also pinned under `devDependencies`).
+所有变量**只在插件加载时读一次**（`getConfig()` 调用时），运行时改 env 不会生效。
 
-## Install (opencode plugin)
+| 变量 | 默认 | 作用 |
+| ---- | ---- | ---- |
+| `CODEBUDDY_ENDPOINT` | _(空)_ | 完整 base URL 覆盖（例如 `https://example.com`），**优先级最高**，跳过 `CODEBUDDY_NETWORK` 与 baseURL 判断。 |
+| `CODEBUDDY_NETWORK` | `internal` | `internal` / `ioa` → 国内端点（`copilot.tencent.com` + `X-Domain: www.codebuddy.cn`）；其他值（含 `internet`）→ 国际（`www.codebuddy.ai`）。 |
+| `CODEBUDDY_AUTH` | `auto` | `auto`（若设置了 `CODEBUDDY_API_KEY` 则用 API Key，否则用 OAuth）、`oauth`（强制 OAuth）、`api`（强制 API Key）。 |
+| `CODEBUDDY_MODEL` | _(空)_ | 强制覆盖请求使用的 model（写进 `X-Model-ID`）。 |
+| `CODEBUDDY_STABLE_CONVERSATION` | `1` | 设为 `0` 降级为 per-request UUID（关闭 session 级 conversation-id 稳定化）。 |
+| `CODEBUDDY_CONVERSATION_MAP_MAX` | `1000` | session → conversationId LRU 的最大容量；`0` 时退化为仅保留最近一个 session。 |
+| `CODEBUDDY_SSE` | `1` | 设为 `0` 禁用 SSE 缓冲（响应原样透传）。 |
+| `CODEBUDDY_SSE_THRESHOLD` | `24` | SSE 缓冲字节阈值，达到即 flush；`0` 等价逐 delta 冲。 |
+| `CODEBUDDY_SSE_DELAY_MS` | `40` | SSE 缓冲最大延迟（毫秒），到达即定时 flush。 |
+| `CODEBUDDY_TENANT_ID` | _(从 JWT 提)_ | 覆盖从 JWT `iss` / `tenant_id` 自动提取的 tenant。仅 OAuth 模式。 |
+| `CODEBUDDY_ENTERPRISE_ID` | _(从 JWT 提)_ | 覆盖从 JWT roles 自动提取的 enterprise。仅 OAuth 模式。 |
+| `CODEBUDDY_USER_ID` | _(从 JWT 提)_ | 覆盖从 JWT `sub` / `user_id` 自动提取的 user。仅 OAuth 模式。 |
+| `CODEBUDDY_API_KEY` | _(空)_ | CodeBuddy API Key（`ck_xxx`），优先级高于 `/connect` 存储的 key；在 `auto` 模式下隐含启用 API Key 模式。 |
 
-```jsonc
-// ~/.config/opencode/opencode.json (recommended, npm git)
-{
-  "plugin": ["opencode-codebuddy-plugin@git+https://github.com/minglo/opencode-codebuddy-plugin.git"]
-}
+### 地址优先级链
+
+```
+CODEBUDDY_ENDPOINT  >  CODEBUDDY_NETWORK  >  provider.codebuddy.options.baseURL  >  默认（internal）
 ```
 
-`opencode` will auto-install via `@npmcli/arborist` (cached in `~/.cache/opencode/packages/`). No manual build needed — `.opencode/plugins/codebuddy.js` is self-contained (superpowers pattern), `package.json#main` points there, `exports["./server"]` ensures server entry survives missing `dist`.
+1. **`CODEBUDDY_ENDPOINT`** 设置 → 直接使用（最高优先级）。
+2. **`CODEBUDDY_NETWORK`** 决定国内 / 国际端点。
+3. **`provider.codebuddy.options.baseURL`**（opencode.json 配置）→ 仅当 `CODEBUDDY_ENDPOINT` **未设置**时生效，可覆盖 `CODEBUDDY_NETWORK` 的结果。
+4. 否则默认国内端点 `https://copilot.tencent.com`。
 
-Alternative — local file plugin (no npm, works offline):
-
-```bash
-cp .opencode/plugins/codebuddy.js ~/.config/opencode/plugins/codebuddy.js
-# no opencode.json entry needed; files in ~/.config/opencode/plugins/*.js auto-load
-```
-
-Sync rule: `src/index.ts` is source of truth; `npm run build` compiles `tsc` → `dist/` and auto-syncs `dist/index.js` → `.opencode/plugins/codebuddy.js` via `scripts/sync-plugin.mjs`.
-
-## Build
-
-```bash
-npm install
-npm run build        # tsc → dist/
-```
-
-The `prepublishOnly` script also runs `tsc`, so `npm publish` is safe out of the box.
+> **2.0.0 优先级反转（破坏性）**：v1 中 opencode.json 里配置的 `provider.options.baseURL` 会覆盖 env 解析结果；v2 中 env（`CODEBUDDY_ENDPOINT` / `CODEBUDDY_NETWORK`）优先，baseURL 仅在 `CODEBUDDY_ENDPOINT` 未设置时生效。若你依赖 baseURL 指定自定义端点，升级后需要改用 `CODEBUDDY_ENDPOINT`。
 
 ---
 
-## Configuration
+## 迁移指南（v1 → v2）
 
-The plugin needs **no configuration** to be useful — it will create a `codebuddy` provider, run OAuth when the user clicks "login", and discover models automatically. Three opt-in modes are supported:
+**2.0.0 无兼容层**：旧 env 变量静默失效（不报错、不警告），v1 的 `provider.options.baseURL` 优先级反转。升级 = 重命名 env + 核对 baseURL 用法。
 
-### Mode 1 — plugin only (recommended)
+### env 重命名映射
 
-Add the plugin to your OpenCode config and do nothing else. The plugin will inject the provider, run `/auth login codebuddy`, and discover models.
+| v1（旧） | v2（新） | 说明 |
+| ---- | ---- | ---- |
+| `CODEBUDDY_API_ENDPOINT` | `CODEBUDDY_ENDPOINT` | 完整 URL 覆盖，优先级最高 |
+| `CODEBUDDY_INTERNET_ENVIRONMENT` | `CODEBUDDY_NETWORK` | `internal`/`ioa` → 国内，其他值（含 `internet`）→ 国际 |
+| `CODEBUDDY_AUTH_MODE` | `CODEBUDDY_AUTH` | `auto` / `oauth` / `api` |
+| `CODEBUDDY_DEFAULT_MODEL` | `CODEBUDDY_MODEL` | 强制覆盖请求 model |
+| `CODEBUDDY_SSE_BUFFER` | `CODEBUDDY_SSE` | `0` = 禁用缓冲 |
+| `CODEBUDDY_SSE_BUFFER_THRESHOLD` | `CODEBUDDY_SSE_THRESHOLD` | 缓冲字节阈值 |
+| `CODEBUDDY_SSE_BUFFER_MAX_DELAY_MS` | `CODEBUDDY_SSE_DELAY_MS` | 最大延迟 flush |
+| `CODEBUDDY_CONVERSATION_ID_MAP_MAX` | `CODEBUDDY_CONVERSATION_MAP_MAX` | LRU 容量 |
+| `CODEBUDDY_STABLE_CONVERSATION_ID` | `CODEBUDDY_STABLE_CONVERSATION` | `0` = 禁用稳定化 |
 
-```jsonc
-{
-  "plugin": ["opencode-codebuddy-plugin"]
-}
-```
+**未变**：`CODEBUDDY_TENANT_ID` / `CODEBUDDY_ENTERPRISE_ID` / `CODEBUDDY_USER_ID` / `CODEBUDDY_API_KEY`。
 
-### Mode 2 — declare the provider, let the plugin discover models
+### 其他变更
 
-```jsonc
-{
-  "plugin": ["opencode-codebuddy-plugin"],
-  "provider": {
-    "codebuddy": {
-      "npm": "@ai-sdk/openai-compatible",
-      "options": { "baseURL": "https://copilot.tencent.com/v2" }
-    }
-  }
-}
-```
-
-### Mode 3 — pin specific models manually
-
-```jsonc
-{
-  "plugin": ["opencode-codebuddy-plugin"],
-  "provider": {
-    "codebuddy": {
-      "npm": "@ai-sdk/openai-compatible",
-      "options": { "baseURL": "https://copilot.tencent.com/v2" },
-      "models": {
-        "my-model": { /* … */ }
-      }
-    }
-  }
-}
-```
-
-In modes 1 and 2 the plugin overwrites `models` with the discovered list. In mode 3 the plugin **only adds models whose id is not already declared** (`if (models[m.id]) continue;`), so your hand-picked entries are preserved.
+- **hook 清单**：v1 README 声称的 `chat.params` / `chat.message` hook 实际不存在（v1 亦未实现），v2 仅实现 `config` / `event` / `auth.loader` / `chat.headers` 四个 hook。
+- **包名**：npm 包名沿用 `opencode-codebuddy-oauth`；`files` 白名单仅含 `dist`，`.opencode/` 与脚本不再打包。
+- **模型发现缓存**：新增 5 分钟 TTL + 并发单飞；401/403 不缓存（走刷新提示）。
 
 ---
 
-## Environment variables
+## API Key 模式
 
-All variables are read **once**, at plugin load time, when the `CONFIG` object is initialized. Changing them at runtime has no effect.
+`/connect codebuddy` 提供两个选项：
 
-| Variable                              | Default        | Effect                                                                                                                                                                                        |
-| ------------------------------------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CODEBUDDY_AUTH_MODE`               | `auto`       | `auto` (use API Key if `CODEBUDDY_API_KEY` is set, otherwise OAuth), `oauth` (force OAuth), or `api` (force API Key).                                                                 |
-| `CODEBUDDY_API_KEY`                 | _(empty)_    | CodeBuddy API Key (`ck_xxx`). Takes priority over `/connect`-stored key. Implies API Key mode in `auto`.                                                                                |
-| `CODEBUDDY_INTERNET_ENVIRONMENT`    | `internal`   | `internal` or `ioa` → CN endpoint (`copilot.tencent.com` + `www.codebuddy.cn`); anything else → international (`www.codebuddy.ai`). Ignored if `CODEBUDDY_API_ENDPOINT` is set. |
-| `CODEBUDDY_API_ENDPOINT`            | _(empty)_    | Full base URL override (e.g.`https://example.com`). Skips the `CODEBUDDY_INTERNET_ENVIRONMENT` switch.                                                                                    |
-| `CODEBUDDY_DEFAULT_MODEL`           | _(empty)_    | Force-overrides the model OpenCode picks.                                                                                                                                                     |
-| `CODEBUDDY_TENANT_ID`               | _(from JWT)_ | Overrides the tenant id auto-extracted from the JWT (`iss` / `tenant_id`). OAuth mode only.                                                                                               |
-| `CODEBUDDY_ENTERPRISE_ID`           | _(from JWT)_ | Overrides the enterprise id auto-extracted from the JWT roles. OAuth mode only.                                                                                                               |
-| `CODEBUDDY_USER_ID`                 | _(from JWT)_ | Overrides the user id auto-extracted from the JWT (`sub` / `user_id`). OAuth mode only.                                                                                                   |
-| `CODEBUDDY_STABLE_CONVERSATION_ID`  | `1`          | Set to`0` to fall back to per-request UUIDs (disable session-level stabilization).                                                                                                          |
-| `CODEBUDDY_CONVERSATION_ID_MAP_MAX` | `1000`       | Capacity of the session → conversationId LRU.                                                                                                                                                |
+1. **IOA 登录 (浏览器)** — 原始 OAuth 流程。
+2. **API Key** — 粘贴 `ck_xxx` Key，存入 `auth.json` 的 `{ type: "api", key }`。
 
----
+也可以直接设置 `CODEBUDDY_API_KEY` 环境变量，优先级高于存储的 key，完全不需要走 `/connect` 流程。
 
-## Environment switch
-
-The plugin supports two ways to pick the upstream endpoint:
-
-1. **`CODEBUDDY_API_ENDPOINT`** — full base URL override. Wins over everything else.
-2. **`CODEBUDDY_INTERNET_ENVIRONMENT`** — `internal` or `ioa` → CN (`https://copilot.tencent.com` + `X-Domain: www.codebuddy.cn`); anything else → international (`https://www.codebuddy.ai` + `X-Domain: www.codebuddy.ai`).
-3. **`baseURL` in OpenCode config** — when set in `provider.codebuddy.options.baseURL`, the host is also used to re-derive `X-Domain`.
-
-| Configuration                                           | Server                          | `X-Domain`          |
-| ------------------------------------------------------- | ------------------------------- | --------------------- |
-| _(default, no env vars set)_                          | `https://copilot.tencent.com` | `www.codebuddy.cn`  |
-| `CODEBUDDY_INTERNET_ENVIRONMENT=internal`             | `https://copilot.tencent.com` | `www.codebuddy.cn`  |
-| `CODEBUDDY_INTERNET_ENVIRONMENT=external` (or empty)  | `https://www.codebuddy.ai`    | `www.codebuddy.ai`  |
-| `CODEBUDDY_API_ENDPOINT=https://my-proxy.example.com` | the override URL                | derived from URL host |
-
-The hard-coded `CONFIG.chatCompletionsPath` is `/v2/chat/completions`, so any `baseURL` override must keep the `/v2` segment aligned with the API path. Pointing the plugin at a non-`/v2` API requires patching the source.
-
----
-
-## API Key mode
-
-`/connect codebuddy` now shows **two options**:
-
-1. **IOA 登录 (浏览器)** — the original OAuth flow.
-2. **API Key** — paste a `ck_xxx` key. Stored as `{ type: "api", key }` in `auth.json`.
-
-Alternatively, set `CODEBUDDY_API_KEY` in the environment; this takes priority over the stored key and avoids the `/connect` flow entirely.
-
-Headers sent in API Key mode:
+API Key 模式下发的请求头：
 
 - `Authorization: Bearer <key>`
 - `X-API-Key: <key>`
 
-No `X-Tenant-Id` / `X-Enterprise-Id` / `X-User-Id` are sent (no JWT to decode), matching the `codebuddy2api` behavior.
+**不发送** `X-Tenant-Id` / `X-Enterprise-Id` / `X-User-Id`（没有 JWT 可解）。
 
-In API Key mode, models are **not** auto-discovered (the `/v3/config` endpoint does not return models for API Key auth). You must declare models in `opencode.json` with their `limit` to enable the usage% display:
+API Key 模式下**不会**自动发现模型（`/v3/config` 接口在 API Key 认证下不返回模型列表）。需要在 `opencode.json` 中手动声明模型：
 
 ```jsonc
 {
-  "plugin": ["opencode-codebuddy-plugin"],
+  "plugin": ["opencode-codebuddy-oauth"],
   "provider": {
     "codebuddy": {
       "models": {
-        "claude-opus-4.6-1m": {
-          "name": "Claude Opus 1M",
-          "limit": { "context": 1000000, "output": 32000 },
+        "auto": {
+          "name": "Auto",
+          "limit": { "context": 168000, "output": 32000 },
           "tool_call": true
         }
       }
@@ -219,68 +176,56 @@ In API Key mode, models are **not** auto-discovered (the `/v3/config` endpoint d
 }
 ```
 
-A typical `.env` for API Key mode:
+典型 `.env`：
 
 ```env
-CODEBUDDY_AUTH_MODE=api
+CODEBUDDY_AUTH=api
 CODEBUDDY_API_KEY=ck_xxxxxxxxxxxxxxxx.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-CODEBUDDY_INTERNET_ENVIRONMENT=internal
+CODEBUDDY_NETWORK=internal
 ```
 
 ---
 
+## 缓存行为
 
+OpenCode 每个 turn 都会把完整 message history 重发到 `/chat/completions`，客户端侧 prefix 天然稳定。插件在此之上加了一层 **session 级 conversation-id 稳定化**：
 
-## Caching behavior
+- `LRUMap<sessionID, conversationId>` 存储每个 OpenCode session 第一次请求时生成的 UUID。
+- 同 session 内所有请求复用同一 `X-Conversation-ID`（跨 turn、跨 tool call）。
+- 触发 `session.compacted` 或 `session.deleted` 时淘汰对应条目。
+- LRU 容量由 `CODEBUDDY_CONVERSATION_MAP_MAX` 控制（默认 `1000`；`0` 退化为仅保留最近一个 session）。
+- 设为 `CODEBUDDY_STABLE_CONVERSATION=0` 可关闭稳定化，降级为 per-request UUID。
 
-OpenCode re-sends the full message history on every turn, so prefix stability is free at the client side. The plugin layers a **session-level conversation-id stabilizer** on top, to align with the upstream prompt cache:
-
-- `sessionConversationIds: LRUMap<sessionID, conversationId>` stores the first UUID minted for each OpenCode session.
-- Every request within the same session reuses the same `X-Conversation-ID` (across turns and tool calls).
-- Different sessions are isolated.
-- `session.compacted` and `session.deleted` events evict the corresponding entry.
-- Capacity is bounded by `CODEBUDDY_CONVERSATION_ID_MAP_MAX` (default `1000`).
-- Setting `CODEBUDDY_CONVERSATION_ID=0` opts out and reverts to per-request UUIDs.
-
-The cache itself lives upstream; this plugin does not store any model output.
+缓存本身存放在上游，本插件不持久化任何模型输出。
 
 ---
 
-## Global install (no npm publish)
+## Token 存储
 
-OpenCode auto-loads every `*.js` in `~/.config/opencode/plugins/` (Windows: `%USERPROFILE%\.config\opencode\plugins\`). Since this package is not published, drop a one-line wrapper that re-exports the local `dist/`:
+- 路径：`~/.local/share/opencode/auth.json`（Linux）／ `%APPDATA%\opencode\auth.json`（Windows）／ `~/Library/Application Support/opencode/auth.json`（macOS），`codebuddy` 键名下。
+- `config` hook 异步读取（`fs.promises`，不阻塞）。
+- OAuth 模式：刷新成功后通过 `input.client.auth.set({ path: { id: "codebuddy" }, body: { type: "oauth", access, refresh, expires } })` 写回；写回失败时 in-memory 续用并记 error 日志。
+- API Key 模式：key 也存在该路径，但**不刷新**（需要在 CodeBuddy 官网手动重新生成）。环境变量 `CODEBUDDY_API_KEY` 始终优先于存储值。
 
-```js
-// ~/.config/opencode/plugins/codebuddy-plugin.js
-export { default } from "file:///D:/opencode-codebuddy-plugin/dist/index.js";
+---
+
+## 构建与开发
+
+```bash
+npm install
+npm run build        # tsup → dist/（ESM + d.ts + sourcemap）
+npm test             # vitest 全套
 ```
 
-After `npm run build` the new `dist/index.js` is picked up on the next OpenCode restart. Update the absolute path if you move the checkout.
+`prepublishOnly` 会先跑 `npm test && npm run build`，发布前无需额外步骤。`npm pack` 产物仅包含 `dist` + `README.md` + `LICENSE` + `package.json`（`files: ["dist"]` 白名单）。
 
-Cleanup:
-
-```powershell
-Remove-Item ~/.config/opencode/plugins/codebuddy-plugin.js
-```
-
----
-
-## Token storage
-
-- Path: `~/.local/share/opencode/auth.json`
-- The `config` hook reads it directly via `fs.readFileSync`.
-- OAuth mode: after a successful refresh the new token is written back through `input.client.auth.set({ path: { id: "codebuddy" }, body: { type: "oauth", access, refresh, expires } })`.
-- API Key mode: the key is stored under the same path; it is **not** refreshed (regenerate it manually on the CodeBuddy website when needed). The env-var `CODEBUDDY_API_KEY` always wins over the stored value.
-
----
-
-## Project layout
+### 目录结构
 
 ```
 .
-├── src/
-│   └── index.ts          # the only source file — exports CodeBuddyAuthPlugin + default
-├── dist/                 # build output (gitignored)
+├── src/               # 分层纯核：config / auth-* / models / headers / sse-buffer / jwt / lru / fetch-json / log
+├── test/              # vitest 用例（镜像源文件）
+├── dist/              # 编译产物（已 gitignore）
 ├── LICENSE
 ├── README.md
 ├── package.json
@@ -289,6 +234,6 @@ Remove-Item ~/.config/opencode/plugins/codebuddy-plugin.js
 
 ---
 
-## License
+## 许可证
 
-[MIT](./LICENSE) — © 2026 HunkYuan.
+[MIT](./LICENSE) — © 2026 HunkYuan。
