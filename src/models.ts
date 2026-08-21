@@ -69,13 +69,13 @@ export class DiscoveryCache {
   private data: RemoteModel[] | null = null;
   private fetchedAt = 0;
   private inflight: Promise<RemoteModel[]> | null = null;
-  fetchFn: (token: string, server: {url:string;domain:string}, signal?:AbortSignal) => Promise<RemoteModel[]>;
-  constructor(private opts: { ttlMs:number; fetchFn: (token: string, server: {url:string;domain:string}, signal?:AbortSignal)=>Promise<RemoteModel[]>; server:{url:string;domain:string} }) { this.fetchFn = opts.fetchFn; }
+  fetchFn: (token: string, signal?: AbortSignal) => Promise<RemoteModel[]>;
+  constructor(private opts: { ttlMs:number; fetchFn: (token: string, signal?: AbortSignal)=>Promise<RemoteModel[]> }) { this.fetchFn = opts.fetchFn; }
   async get(token:string, { signal }: { signal?:AbortSignal }): Promise<RemoteModel[]> {
     const now = Date.now();
     if (this.data && (now - this.fetchedAt) < this.opts.ttlMs) return this.data;
     if (this.inflight) return this.inflight;
-    this.inflight = this.fetchFn(token, this.opts.server, signal).then(d => { this.data = d; this.fetchedAt = Date.now(); return d; }).catch(e => {
+    this.inflight = this.fetchFn(token, signal).then(d => { this.data = d; this.fetchedAt = Date.now(); return d; }).catch(e => {
       if ((e as any)?.status === 401 || (e as any)?.status === 403) throw e;
       if (!this.data) { this.data = [DEFAULT_MODEL]; this.fetchedAt = now; return this.data; }
       return this.data;

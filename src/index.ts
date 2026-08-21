@@ -20,8 +20,8 @@ export const CodeBuddyAuthPlugin: Plugin = async (input: PluginInput) => {
   const refreshLock = new RefreshLock();
   const discoveryCache = new DiscoveryCache({
     ttlMs: 5*60*1000,
-    fetchFn: fetchRemoteModels,                // 真实实现（Task 11），401/403 抛、网络/5xx 返回 []
-    server,
+    // fetchFn 闭包捕获 live server（let）：config hook 覆写 baseURL 后 discovery 与 loader 打同一 host
+    fetchFn: (token, signal) => fetchRemoteModels(token, server, signal),
   });
 
   return {

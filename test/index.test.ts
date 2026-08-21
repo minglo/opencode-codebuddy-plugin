@@ -63,6 +63,21 @@ describe("index config hook 全量", () => {
     expect(cfg.provider.codebuddy.models.auto).toBeUndefined();
     spy.mockRestore();
   });
+  it("baseURL 覆写后 discovery fetchFn 用 live server（非构造时快照）", async () => {
+    delete process.env.CODEBUDDY_ENDPOINT; delete process.env.CODEBUDDY_NETWORK;
+    const readFile = vi.mocked(fs.promises.readFile as any);
+    readFile.mockResolvedValueOnce(JSON.stringify({ codebuddy: { type:"oauth", access:"a", refresh:"r", expires: 0 } }));
+    const spy = vi.spyOn(await import("../src/models.js"), "fetchRemoteModels").mockResolvedValue([{ id:"m1", name:"M1", supportsToolCall:true }]);
+    const plugin = await CodeBuddyAuthPlugin({ client: { app:{ log: vi.fn().mockResolvedValue(undefined) } } } as any);
+    const cfg: any = { provider: { codebuddy: { options:{ baseURL:"https://my-proxy.example.com/v2" } } } };
+    await plugin.config!(cfg);
+    // discovery 请求打到覆写后的 live server，而非构造时快照
+    expect(spy).toHaveBeenCalledWith("a", expect.objectContaining({ url:"https://my-proxy.example.com" }), undefined);
+    // 与 loader baseURL 同源一致
+    const loader = await (plugin as any).auth.loader(async ()=>({ type:"api", key:"k" }));
+    expect(loader.baseURL).toBe("https://my-proxy.example.com");
+    spy.mockRestore();
+  });
 });
 
 describe("index chat.headers", () => {
