@@ -1,6 +1,7 @@
 // src/auth-fetch.ts
 import type { AuthState } from "./auth-state.js";
 import { needsRefresh } from "./auth-state.js";
+import { DEFAULT_EXPIRES_MS } from "./config.js";
 import type { Logger } from "./log.js";
 export type AuthFetchDeps = {
   getAuth: () => Promise<unknown>;
@@ -24,11 +25,11 @@ export function createAuthFetch(deps: AuthFetchDeps) {
   const doFetch = () => fetchImpl ?? globalThis.fetch;
   const logError = (e: unknown) => deps.logger ? deps.logger.error(`auth.json write-back failed: ${(e as Error).message}`) : console.error(`[codebuddy] error: auth.json write-back failed:`, e);
   const applyRefresh = async (prev: AuthState & { type:"oauth" }, refreshed: { accessToken:string; refreshToken?:string; expiresIn?:number }): Promise<AuthState> => {
-    const newExpires = refreshed.expiresIn ? Date.now() + refreshed.expiresIn * 1000 : Date.now() + 24*60*60*1000;
-    const next: AuthState = { type: "oauth", access: refreshed.accessToken, refresh: refreshed.refreshToken || prev.refresh, expires: newExpires };
-    const writeBody = { type: "oauth" as const, access: next.access, refresh: next.refresh, expires: next.expires };
+    const newExpires = refreshed.expiresIn ? Date.now() + refreshed.expiresIn * 1000 : Date.now() + DEFAULT_EXPIRES_MS;
+    const nextState = { type: "oauth" as const, access: refreshed.accessToken, refresh: refreshed.refreshToken || prev.refresh, expires: newExpires };
+    const writeBody = { ...nextState };  // C6 共用来源：持久化 body 与 activeAuth 同源，字段不各自构造
     try { await client.auth.set({ path: { id: "codebuddy" }, body: writeBody }); } catch (e) { logError(e); }
-    return next;
+    return nextState;
   };
   return async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const urlStr = url.toString();
@@ -45,11 +46,13 @@ export function createAuthFetch(deps: AuthFetchDeps) {
       const identity = a.type === "oauth" ? resolveIdentity(decodeJwtPayload(a.access), cfg) : { tenantId:"", enterpriseId:"", userId:"" };
       for (const [k,v] of Object.entries(buildAuthHeaders(a, identity as any))) headers.set(k, v);
       let body: BodyInit | null | undefined = init.body as BodyInit;
-      try {
-        const raw = typeof body === "string" ? body as string : new TextDecoder().decode(body as ArrayBuffer);
-        const parsed = JSON.parse(raw);
-        if (parsed.stream === true && !parsed.stream_options) { parsed.stream_options = { include_usage: true }; body = JSON.stringify(parsed); }
-      } catch {}
+      // 仅处理字符串 JSON body（opencode 实际场景）；其他类型（Stream/FormData/Blob）跳过解析直接透传
+      if (typeof body === "string") {
+        try {
+          const parsed = JSON.parse(body);
+          if (parsed.stream === true && !parsed.stream_options) { parsed.stream_options = { include_usage: true }; body = JSON.stringify(parsed); }
+        } catch {}
+      }
       return doFetch()(`${server.url}${chatCompletionsPath}`, { method: "POST", headers, body: body as BodyInit, signal: init.signal });
     };
     let activeAuth: AuthState = auth;

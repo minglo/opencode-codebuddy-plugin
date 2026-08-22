@@ -83,7 +83,7 @@ describe("sse-buffer format & leftover", () => {
     expect(out).toContain('"object":"chat.completion.chunk"');
     expect(out).toContain("[DONE]");
   });
-  it("leftover 数组收集（O(n²) 修复）", async () => {
+  it("跨包 UTF-8 多字节不截断", async () => {
     // 跨包 UTF-8：1-2 字符/包场景
     const enc = new TextEncoder();
     const part1 = enc.encode(sseDelta({ content:"你" }).slice(0, 10));

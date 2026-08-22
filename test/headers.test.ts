@@ -49,4 +49,24 @@ describe("headers", () => {
     expect(h["Authorization"]).toBe("Bearer k");
     expect(h["X-API-Key"]).toBe("k");
   });
+  it("22 头全量快照（不含 X-Model-ID）", () => {
+    const h = buildRequestHeaders("s", "", makeDeps({ model: "" }));
+    expect(Object.keys(h).sort()).toEqual([
+      "Accept", "Content-Type", "User-Agent", "X-Agent-Intent", "X-B3-ParentSpanId",
+      "X-B3-Sampled", "X-B3-SpanId", "X-B3-TraceId", "X-Conversation-ID",
+      "X-Conversation-Message-ID", "X-Conversation-Request-ID", "X-Domain", "X-Env-ID",
+      "X-IDE-Name", "X-IDE-Type", "X-IDE-Version", "X-Product", "X-Product-Version",
+      "X-Request-ID", "X-Request-Trace-Id", "X-Requested-With", "b3",
+    ]);
+  });
+  it("oauth 条件注入 X-Tenant-Id/X-Enterprise-Id/X-User-Id", () => {
+    const h = buildAuthHeaders({ type:"oauth", access:"a", refresh:"r", expires:1 } as any, { tenantId:"t", enterpriseId:"e", userId:"u" });
+    expect(h["X-Tenant-Id"]).toBe("t");
+    expect(h["X-Enterprise-Id"]).toBe("e");
+    expect(h["X-User-Id"]).toBe("u");
+    const empty = buildAuthHeaders({ type:"oauth", access:"a", refresh:"r", expires:1 } as any, { tenantId:"", enterpriseId:"", userId:"" });
+    expect(empty["X-Tenant-Id"]).toBeUndefined();
+    expect(empty["X-Enterprise-Id"]).toBeUndefined();
+    expect(empty["X-User-Id"]).toBeUndefined();
+  });
 });

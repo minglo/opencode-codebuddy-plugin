@@ -68,7 +68,10 @@ export function buildAuthHeaders(
   auth: { type: "api"; key: string } | { type: "oauth"; access: string; refresh: string; expires: number },
   identity: { tenantId: string; enterpriseId: string; userId: string },
 ): Record<string,string> {
-  if (auth.type === "api") return { Authorization: `Bearer ${auth.key}`, "X-API-Key": auth.key };
+  if (auth.type === "api") {
+    // D9: 双头保留，服务端校验头未知，生产双头在用，盲删 401
+    return { Authorization: `Bearer ${auth.key}`, "X-API-Key": auth.key };
+  }
   const h: Record<string,string> = { Authorization: `Bearer ${auth.access}` };
   if (identity.tenantId) h["X-Tenant-Id"] = identity.tenantId;
   if (identity.enterpriseId) h["X-Enterprise-Id"] = identity.enterpriseId;

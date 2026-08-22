@@ -112,10 +112,15 @@ describe("index chat.headers", () => {
     expect(out.headers["X-Model-ID"]).toBe("forced-model");
     delete process.env.CODEBUDDY_MODEL;
   });
-  it("stream_options 仅 stream:true 注入（非流式不注入）", async () => {
-    // 通过 auth.loader.fetch 的 doRequest 间接验证：此处仅验证 chat.headers 不改 body
+  it("stream_options 仅 stream:true 注入（loader fetch 真实 body 断言）", async () => {
+    const spy = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    (globalThis as any).fetch = spy;
     const plugin = await CodeBuddyAuthPlugin({ client: { app:{ log: vi.fn().mockResolvedValue(undefined) } } } as any);
-    expect(plugin).toBeDefined();
+    const loader = await (plugin as any).auth.loader(async () => ({ type:"api", key:"k" }));
+    await loader.fetch("https://copilot.tencent.com/v2/chat/completions", { method:"POST", body: JSON.stringify({stream:true, messages:[]}) });
+    expect(JSON.parse(spy.mock.calls[0][1].body).stream_options).toEqual({ include_usage:true });
+    await loader.fetch("https://copilot.tencent.com/v2/chat/completions", { method:"POST", body: JSON.stringify({stream:false, messages:[]}) });
+    expect(JSON.parse(spy.mock.calls[1][1].body).stream_options).toBeUndefined();
   });
 });
 

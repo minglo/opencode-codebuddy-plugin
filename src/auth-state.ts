@@ -1,4 +1,5 @@
 // src/auth-state.ts
+import { REFRESH_SKEW_MS } from "./config.js";
 import type { CodeBuddyConfig } from "./config.js";
 
 export type AuthState = { type:"api"; key:string } | { type:"oauth"; access:string; refresh:string; expires:number };
@@ -35,7 +36,6 @@ export function effectiveAuth(stored: AuthState | undefined, cfg: Pick<CodeBuddy
   return null;
 }
 
-const REFRESH_SKEW_MS = 5*60*1000;
 export function needsRefresh(auth: AuthState, now: number): boolean {
   return auth.type === "oauth" && !!auth.refresh && (auth.expires - REFRESH_SKEW_MS) < now;
 }

@@ -58,11 +58,14 @@ export function getConfig(): CodeBuddyConfig {
   };
 }
 
-export function resolveServerUrl(cfg: Pick<CodeBuddyConfig,"endpoint"|"network"> & { endpoint?:string }): { url:string; domain:string } {
+export function domainForHost(url: string): string {
+  try { return new URL(url).host.includes("codebuddy.ai") ? "www.codebuddy.ai" : "www.codebuddy.cn"; } catch { return url.includes("codebuddy.ai") ? "www.codebuddy.ai" : "www.codebuddy.cn"; }
+}
+
+export function resolveServerUrl(cfg: Pick<CodeBuddyConfig,"endpoint"|"network">): { url:string; domain:string } {
   if (cfg.endpoint) {
     const url = cfg.endpoint.replace(/\/+$/, "");
-    const domain = url.includes("codebuddy.ai") ? "www.codebuddy.ai" : "www.codebuddy.cn";
-    return { url, domain };
+    return { url, domain: domainForHost(url) };
   }
   if (cfg.network === "internal" || cfg.network === "ioa") return { url: "https://copilot.tencent.com", domain: "www.codebuddy.cn" };
   return { url: "https://www.codebuddy.ai", domain: "www.codebuddy.ai" };

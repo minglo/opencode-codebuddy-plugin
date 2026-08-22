@@ -56,6 +56,31 @@ describe("auth-fetch", () => {
     const ac = new AbortController();
     await af("https://x/v2/chat/completions", { method:"POST", body: JSON.stringify({stream:true}), signal: ac.signal } as any);
   });
+  it("stream:true 缺 stream_options 注入 {include_usage:true}", async () => {
+    const spy = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    (globalThis as any).fetch = spy;
+    const af = createAuthFetch(makeDeps());
+    await af("https://x/v2/chat/completions", { method:"POST", body: JSON.stringify({stream:true, messages:[]}) } as any);
+    const sent = JSON.parse(spy.mock.calls[0][1].body);
+    expect(sent.stream_options).toEqual({ include_usage:true });
+  });
+  it("已含 stream_options 不覆写", async () => {
+    const spy = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    (globalThis as any).fetch = spy;
+    const af = createAuthFetch(makeDeps());
+    await af("https://x/v2/chat/completions", { method:"POST", body: JSON.stringify({stream:true, stream_options:{ include_usage:false }}) } as any);
+    const sent = JSON.parse(spy.mock.calls[0][1].body);
+    expect(sent.stream_options).toEqual({ include_usage:false });
+  });
+  it("非流式原样透传（不注入 stream_options）", async () => {
+    const spy = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    (globalThis as any).fetch = spy;
+    const af = createAuthFetch(makeDeps());
+    await af("https://x/v2/chat/completions", { method:"POST", body: JSON.stringify({stream:false, messages:[]}) } as any);
+    const sent = JSON.parse(spy.mock.calls[0][1].body);
+    expect(sent).toEqual({ stream:false, messages:[] });
+    expect(sent.stream_options).toBeUndefined();
+  });
   it("SSE 包装保留原头：content-type text/event-stream 存活", async () => {
     (globalThis as any).fetch = async () => new Response(new ReadableStream({ start(c){ c.close(); } }), { status: 200, headers: { "Content-Type": "text/event-stream" } });
     const af = createAuthFetch(makeDeps({ cfg: { sse: { enabled: true, threshold: 24, maxDelayMs: 40 } } } as any));

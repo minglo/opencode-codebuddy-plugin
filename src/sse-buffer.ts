@@ -18,8 +18,7 @@ export function createSSEBufferedStream(
   const encoder = new TextEncoder();
   const threshold = opts.threshold;
   const maxDelay = opts.maxDelayMs;
-  let leftoverChunks: string[] = [];
-  let leftover = "";
+  let chunks: string[] = [];
   let reasoningBuf = "";
   let contentBuf = "";
   let reasoningTimer: ReturnType<typeof setTimeout> | null = null;
@@ -47,11 +46,17 @@ export function createSSEBufferedStream(
 
   return body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
-      leftover += decoder.decode(chunk, { stream:true });
-      const lines = leftover.split("\n");
-      leftover = lines.pop() ?? "";
-      for (const rawLine of lines) {
-        const line = rawLine;
+      chunks.push(decoder.decode(chunk, { stream:true }));
+      const all = chunks.join("");
+      chunks = [];
+      const nl = all.lastIndexOf("\n");
+      if (nl === -1) { chunks = [all]; return; }
+      const complete = all.slice(0, nl + 1);
+      const rest = all.slice(nl + 1);
+      if (rest) chunks = [rest];
+      const lines = complete.split("\n");
+      if (lines[lines.length - 1] === "") lines.pop();
+      for (const line of lines) {
         if (!line.startsWith("data: ")) {
           if (reasoningBuf) { flushBuf(controller, "reasoning_content", reasoningBuf); reasoningBuf=""; clearReasoningTimer(); }
           if (contentBuf) { flushBuf(controller, "content", contentBuf); contentBuf=""; clearContentTimer(); }
@@ -115,7 +120,7 @@ export function createSSEBufferedStream(
       clearReasoningTimer(); clearContentTimer();
       if (reasoningBuf) flushBuf(controller, "reasoning_content", reasoningBuf);
       if (contentBuf) flushBuf(controller, "content", contentBuf);
-      if (leftover) controller.enqueue(encoder.encode(leftover));
+      if (chunks.length) { const rest = chunks.join(""); if (rest) controller.enqueue(encoder.encode(rest)); }
     },
   }));
 }
