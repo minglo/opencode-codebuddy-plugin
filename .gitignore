@@ -6,3 +6,4 @@ dist/
 .idea/
 *.tsbuildinfo
 bun.lock
+*.tgz

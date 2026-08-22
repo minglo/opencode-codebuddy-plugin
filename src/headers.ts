@@ -3,10 +3,17 @@ import type { CodeBuddyConfig } from "./config.js";
 import type { LRUMap } from "./lru.js";
 
 function generateTraceId(): string {
-  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID().replace(/-/g, "");
-  const bytes = new Uint8Array(16);
-  globalThis.crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  const c = globalThis.crypto;
+  if (c?.randomUUID) return c.randomUUID().replace(/-/g, "");
+  if (c?.getRandomValues) {
+    const bytes = new Uint8Array(16);
+    c.getRandomValues(bytes);
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  // crypto 整体缺失（Node <19 无 flag 的 npm 安装路径）：Math.random 兜底，保证不崩
+  let s = "";
+  for (let i = 0; i < 32; i++) s += Math.floor(Math.random() * 16).toString(16);
+  return s;
 }
 function getOrCreateConversationId(lru: LRUMap<string,string>, sessionId: string | undefined, stable: boolean): string {
   if (!stable || !sessionId) return generateTraceId();

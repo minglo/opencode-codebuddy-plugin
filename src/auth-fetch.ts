@@ -34,9 +34,19 @@ export function createAuthFetch(deps: AuthFetchDeps) {
     try { await client.auth.set({ path: { id: "codebuddy" }, body: writeBody }); } catch (e) { logError(e); }
     return nextState;
   };
+  // 预刷新/401 兜底共用：RefreshLock 单飞 + 写回收进 lock，失败记录冷却
+  const tryRefresh = async (oauthAuth: AuthState & { type:"oauth" }): Promise<AuthState | null> => {
+    return refreshLock.run("codebuddy", async () => {
+      const r = await deps.refreshAccessToken(oauthAuth.refresh, server.url);
+      if (r?.accessToken) return await applyRefresh(oauthAuth, r);
+      lastRefreshFailedAt = Date.now();
+      return null;
+    });
+  };
   return async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const urlStr = url.toString();
-    if (!urlStr.includes("/chat/completions")) return doFetch()(url, init);
+    // 单一来源：判定与拼接共用 chatCompletionsPath，不硬编码路径
+    if (!urlStr.includes(chatCompletionsPath)) return doFetch()(url, init);
     const stored = await getAuth();
     const auth = deps.effectiveAuth(stored);
     if (!auth) {
@@ -62,25 +72,13 @@ export function createAuthFetch(deps: AuthFetchDeps) {
     // A4 预刷新：过期前 REFRESH_SKEW_MS 内先刷新（RefreshLock 单飞，避免并发），失败则沿用旧 token；失败后 15s 冷却期内不再试
     // 写回收进 lock 内部，并发请求共享同一 refresh + 单次 client.auth.set，避免幂等双写
     if (activeAuth.type === "oauth" && activeAuth.refresh && needsRefresh(activeAuth, Date.now()) && !inCooldown()) {
-      const oauthAuth = activeAuth;
-      const next = await refreshLock.run("codebuddy", async () => {
-        const r = await deps.refreshAccessToken(oauthAuth.refresh, server.url);
-        if (r?.accessToken) return await applyRefresh(oauthAuth, r);
-        lastRefreshFailedAt = Date.now();
-        return null;
-      });
+      const next = await tryRefresh(activeAuth);
       if (next) activeAuth = next;
     }
     let response = await doRequest(activeAuth);
     if (activeAuth.type === "oauth" && (response.status === 401 || response.status === 403) && activeAuth.refresh && !inCooldown()) {
-      // 401/403 兜底：RefreshLock 按 PROVIDER_ID 单例，冷却期内跳过；写回收进 lock 单次执行
-      const oauthAuth = activeAuth;
-      const next = await refreshLock.run("codebuddy", async () => {
-        const r = await deps.refreshAccessToken(oauthAuth.refresh, server.url);
-        if (r?.accessToken) return await applyRefresh(oauthAuth, r);
-        lastRefreshFailedAt = Date.now();
-        return null;
-      });
+      // 401/403 兜底：RefreshLock 单例 + 冷却期内跳过；写回收进 lock 单次执行
+      const next = await tryRefresh(activeAuth);
       if (next) {
         activeAuth = next;
         response = await doRequest(activeAuth);

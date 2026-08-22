@@ -159,6 +159,7 @@ export async function fetchJson<T>(url: string, opts: {
 - `buildAuthHeaders(auth, identity)`：
   - api：`Authorization: Bearer key` **与 `X-API-Key` 双头保留**——偏离原去重计划（D9）。理由 [INFERRED]：服务端对 api key 类型校验哪个头未知，生产双头在用；盲删可能 401。注释说明原因。
   - oauth：Authorization + X-Tenant/X-Enterprise/X-User（identity 已解码）
+- `generateTraceId` 回退链补全（2026-08-22 后审查修正）：`randomUUID` → `getRandomValues` → **crypto 整体缺失时 `Math.random` 兜底**（原设计回退链末端仍依赖 `globalThis.crypto`，Node <19 无 flag 时 `undefined.getRandomValues` 直接 TypeError；engines 已升 `>=22`，Node 22 自带 Web Crypto 无缺口，Math.random 为纯防御兜底）
 - `resolveModel(inputModel?)`：`cfg.model`（`CODEBUDDY_MODEL`）优先覆盖 `input.model.id`，否则透传；由 `headers.ts` 导出、`index.ts` 的 `chat.headers` 钩子调用后传给 `buildRequestHeaders`
 
 ### 5.7 auth-state.ts
@@ -245,6 +246,7 @@ DiscoveryCache（修 D2）：内存 `{ data, fetchedAt }`，TTL 5min。**惰性 
 - 缓冲非空时设 `setTimeout(maxDelayMs)`；回调内 `try { controller.enqueue(flushBuf) } catch {}` + 清 timer（Bun/Node 部分实现在流已 close 后 `enqueue` 会抛 `TypeError: controller is not active`，需捕获）
 - transform 内 flush 触发（threshold 达标 / `FLUSH_RE` 标点 / 类型切换 / finish / tool_calls / `[DONE]` / 非 data 行）时先 `clearTimeout`
 - `flushBuf(controller, field)` 收敛 ×8 处 JSON 模板（C1）——**核对：现状模板共 14 处（L462/471/485/490/503/511/541/565/603/616/629/636/647/654），分 3 种格式**：完整格式（含 id/object/created，4 处）、简单格式 `{choices:[{delta}]}`（8 处）、payload spread 格式（2 处）；统一为一种完整格式是**行为变更**（下游宽容成立），5.10 已注明；输出统一完整格式：`{ id:"buffered", object:"chat.completion.chunk", created, choices:[{index:0, delta:{[field]:buf}, finish_reason:null}] }`
+  - **偏离修正（2026-08-22 后审查）**：完整格式的伪造外层 `id:"buffered"`/`created:Date.now()` 与 payload-spread 路径格式分裂，且伪造 id 破坏下游按 id 去重语义。改为：`flushBuf` 接收最近真实 chunk 的 `payload`/`first`，输出 `{...payload, choices:[{...first, delta:{[field]:buf}}]}` 与阈值/标点触发路径完全统一；仅在无 payload 上下文（流尾 `flush()`）回退完整格式兜底。测试补"定时 flush 透传真实 id、流尾 flush 兜底完整格式"两用例
 - `flush()` 清双 timer + 冲剩余 buffer + leftover
 - leftover 用数组收集 join（修 D5 O(n²)）
 - `FLUSH_RE = /[。！？.!?；;，,：:]$/` 模块级预编译（修 D8）；**`hasFlushTrigger(s)` 保留双触发**：`s.includes("\n")`（现状 L448，多行代码块/文本分块，设计必须保留——仅标点会致大段代码滞留）+ `FLUSH_RE.test(s.trimEnd())`（SSE delta 可能带尾空格/`\r`，去 `trimEnd` 会漏触发慢速 flush）
@@ -273,6 +275,7 @@ DiscoveryCache（修 D2）：内存 `{ data, fetchedAt }`，TTL 5min。**惰性 
 实现要点（行为契约，deps 不扩展）：
 
 - `init.signal` 透传至 doRequest（`signal: init?.signal`，请求可取消）
+- **透传守卫与请求拼接共用 `chatCompletionsPath` 单一来源**：`!urlStr.includes(chatCompletionsPath)` 而非硬编码 `"/chat/completions"`（2026-08-22 后审查修正——原 5.13 文内硬编码与 5.12-1 的"单一来源"自相矛盾，硬编码还会宽匹配 `/foo/chat/completions-bar` 误判）
 - SSE 响应包装保留原头：`new Response(bufferedBody, { status, statusText, headers: response.headers })`——包装层在 loader fetch 内，**不在 sse-buffer 测试域**，`content-type: text/event-stream` 存活断言落 auth-fetch 测试
 
 ```
@@ -317,7 +320,7 @@ src/
     "types": "dist/index.d.ts",
     "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
     "files": ["dist"],
-    "engines": { "node": ">=18" },
+    "engines": { "node": ">=22" },
     "scripts": { "build": "tsup", "test": "vitest run", "prepublishOnly": "npm test && npm run build" },
     "peerDependencies": { "@opencode-ai/plugin": ">=1.18.0" },
     "devDependencies": { "@opencode-ai/plugin": "1.18.0", "@opencode-ai/sdk": "^1.0.0", "tsup": "latest", "vitest": "latest", "typescript": "^5.8.0" }
@@ -385,6 +388,7 @@ src/
 | D8 | FLUSH_RE 动态编译 | sse-buffer.ts 预编译（保留 trimEnd 见 5.10） |
 | D9 | api 双认证头 | **偏离：保留双头**，理由见 5.6 |
 | D10 | requestAuthState 无超时（网络挂起卡死 authorize） | auth-flow.ts `AUTH_STATE_TIMEOUT_MS`（见 5.1/5.8） |
+| D11 | generateTraceId 回退链依赖 crypto 全局（Node<19 无 flag 崩溃） | headers.ts 三阶回退（randomUUID→getRandomValues→Math.random，见 5.6） |
 | E1 | 单文件 7 职责 | 第 4 节结构（含 auth-fetch.ts，见 5.13） |
 | E2 | CONFIG 顶层快照 | config.ts getConfig() |
 | E3 | 手写 LRUMap 冗长 | lru.ts 精简（max<=0 退化单条见 5.3） |

@@ -91,7 +91,7 @@ describe("auth-fetch", () => {
     const spy = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
     (globalThis as any).fetch = spy;
     const af = createAuthFetch(makeDeps({ chatCompletionsPath: "/custom/path" } as any));
-    await af("https://x/v2/chat/completions", { method:"POST", body: JSON.stringify({stream:true}) } as any);
+    await af("https://x/custom/path", { method:"POST", body: JSON.stringify({stream:true}) } as any);
     expect(spy.mock.calls[0][0]).toBe("https://x/custom/path");
   });
   it("RefreshLock key 用 PROVIDER_ID（codebuddy）单例", async () => {

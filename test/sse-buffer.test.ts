@@ -72,6 +72,30 @@ describe("sse-buffer maxDelay 双侧定时", () => {
     expect(out).toContain("z");
     await new Promise(r => setTimeout(r, 30)); // timer 触发但不抛
   });
+  it("流尾 flush 无 payload 上下文时回退完整格式兜底（不伪造真实 id）", async () => {
+    // 单 chunk 达 threshold 前由 flush() 冲空（流关闭后定时器不再触发），无上下文 → 兜底完整格式
+    const stream = makeStream([sseDelta({ reasoning_content:"x" })]);
+    const buffered = createSSEBufferedStream(stream, { threshold: 100, maxDelayMs: 1000 });
+    const out = await collect(buffered);
+    expect(out).toContain('"id":"buffered"');
+    expect(out).toContain('"reasoning_content":"x"');
+  });
+  it("定时 flush 透传真实 payload 外层（id/created 不伪造为 buffered）", async () => {
+    // 流保持打开，定时器在流内触发；外层 id 应保留真实 chunk 的值
+    let enq: ((ch: Uint8Array) => void) | null = null;
+    let closeStream: (() => void) | null = null;
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) { enq = (ch) => c.enqueue(ch); closeStream = () => c.close(); },
+    });
+    const buffered = createSSEBufferedStream(stream, { threshold: 100, maxDelayMs: 15 });
+    const outP = collect(buffered);
+    enq!(new TextEncoder().encode(sseDelta({ reasoning_content:"x" })));
+    await new Promise(r => setTimeout(r, 40)); // 定时器在流打开期间触发
+    closeStream!(); // 关闭流，collect 结束
+    const out = await outP;
+    expect(out).toContain('"id":"test"'); // 真实外层 id 透传
+    expect(out).not.toContain('"id":"buffered"'); // 不伪造
+  });
 });
 
 describe("sse-buffer format & leftover", () => {

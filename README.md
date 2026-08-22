@@ -1,5 +1,7 @@
 # opencode-codebuddy-oauth
 
+> 致谢：本插件基于 [HunkYuan/opencode-codebuddy-plugin](https://github.com/HunkYuan/opencode-codebuddy-plugin) 的灵感修改而来，感谢原作者的设计思路与贡献。
+
 为 [CodeBuddy](https://www.codebuddy.cn)（即 **IOA**，腾讯编程助手）提供 OpenCode 插件，将 CodeBuddy 作为已认证 provider 接入 OpenCode。
 
 支持 **两种鉴权模式**：
@@ -7,13 +9,15 @@
 - **OAuth** — 走 IOA `/v2/plugin/auth/state` → 浏览器 → 轮询拿 token 流程。
 - **API Key** — 直接粘贴在 CodeBuddy 官网生成的 `ck_xxx` Key，模型通过 `opencode.json` 配置。
 
-> **2.0.0 为破坏性重设计**：env 变量重命名 9 项、baseURL 优先级反转，**无兼容层**，旧配置静默失效。升级前请阅读[迁移指南](#迁移指南-v1--v2)。
-
 ---
 
 ## 安装
 
-在项目（或全局 `~/.config/opencode/opencode.json`）的 `plugin` 数组中声明本插件：
+本插件**开箱即用** — 自动创建 `codebuddy` provider、提供 OAuth 登录入口、自动发现模型。支持以下安装方式：
+
+### 方式 1 — npm 包（推荐）
+
+在项目（或全局 `~/.config/opencode/opencode.json`）的 `plugin` 数组中声明：
 
 ```jsonc
 {
@@ -22,16 +26,42 @@
 }
 ```
 
-> 已构建待发布：`npm publish` 后即可直接以包名 `opencode-codebuddy-oauth` 安装；发布前如需本地验证，请使用 `file:` / `git:` 引用。环境要求：Node.js ≥ 18，OpenCode ≥ 1.18.0（peer 依赖 `@opencode-ai/plugin`）。
+> 已构建待发布：`npm publish` 后即可直接以包名 `opencode-codebuddy-oauth` 安装；发布前如需本地验证，请使用 `file:` / `git:` 引用。环境要求：Node.js ≥ 22，OpenCode ≥ 1.18.0（peer 依赖 `@opencode-ai/plugin`）。
 
-## 快速开始
+### 方式 2 — 本地 wrapper（无需发布到 npm）
 
-启动 OpenCode 后运行：
+OpenCode 会自动加载 `~/.config/opencode/plugins/` 下所有 `*.js`（Windows：`%USERPROFILE%\.config\opencode\plugins\`）。放一个 wrapper 文件 re-export 本地的 `dist/`：
 
-- **`/connect codebuddy`** → 选择 **IOA 登录 (浏览器)**，按提示在浏览器中完成 IOA 认证（OAuth 模式）。
-- **`/connect codebuddy`** → 选择 **API Key 登录**，粘贴 `ck_xxx` Key（API Key 模式）。
+```js
+// ~/.config/opencode/plugins/codebuddy-oauth.js
+export { default } from "file:///path/to/opencode-codebuddy-oauth/dist/index.js";
+```
 
-插件会自动创建 `codebuddy` provider、发现模型（OAuth 模式）。开箱即用，无需额外配置。
+`npm run build` 之后新 `dist/index.js` 在 OpenCode 下次启动时自动生效。如果本地路径变化，需要同步更新这个 wrapper 文件。
+
+清理：
+
+```powershell
+Remove-Item ~/.config/opencode/plugins/codebuddy-oauth.js
+```
+
+## 命令行认证
+
+OAuth 流程可以完全在命令行完成，无需启动 OpenCode 界面：
+
+```bash
+opencode providers login --provider codebuddy
+```
+
+浏览器会打开 IOA 登录页面，完成后 token 自动保存到本地（`auth.json`）。
+
+也支持在 OpenCode 内操作：
+
+1. 运行 `/connect codebuddy`，选择 **IOA 登录 (浏览器)**。
+2. 终端会输出 `url` 与 `instructions`（"请在浏览器中完成 IOA 登录"）——在**任意**浏览器中打开该 URL，完成 IOA 登录。
+3. 插件随即轮询 `GET /v2/plugin/auth/token?state=<state>`（3 秒间隔、10 分钟超时），拿到 token 后自动写回 `auth.json`，认证完成。
+
+对应源码：`src/index.ts` 中 `auth.methods` 的 `requestAuthState`（申请 `state`）与 `pollForToken`（`src/auth-flow.ts`，轮询拿 token）。
 
 ---
 
@@ -39,8 +69,8 @@
 
 - **OAuth 登录** — 直接在编辑器内走 IOA 流程：`/v2/plugin/auth/state` → 浏览器 → 轮询拿 token。
 - **API Key 登录** — 在 `/connect codebuddy` 处粘贴 `ck_xxx` Key；无需浏览器、不轮询、不刷新。
-- **自动模型发现** — OAuth 模式启动时调用 `GET /v3/config`（带 5 分钟 TTL 缓存 + 并发单飞去重），把支持 tool call 的 craft agent 模型写入 `provider.codebuddy.models`；API Key 模式下模型从 `opencode.json` 配置读取。
-- **401/403 自动刷新 token** — 自定义 `fetch` 拦截器捕获鉴权失败（仅 OAuth 模式），调 `/v2/plugin/auth/token/refresh` 拿新 token，写回 `auth.json` 后重试一次；`RefreshLock` 按 provider 单例去重并发刷新。过期 token 在请求发出前预刷新（5 分钟 skew），避免浪费 RTT。
+- **自动模型发现** — OAuth 模式启动时调用 `GET /v3/config`（5 秒超时），提取 craft agent 的模型列表并写入 `provider.codebuddy.models`（5 分钟 TTL 缓存 + 并发单飞去重，401/403 不缓存）；API Key 模式下模型从 `opencode.json` 配置读取。
+- **401/403 自动刷新 token** — 自定义 `fetch` 拦截器捕获鉴权失败（仅 OAuth 模式），调 `/v2/plugin/auth/token/refresh` 拿新 token，写回 `auth.json` 后重试一次；`RefreshLock` 按 provider 单例去重并发刷新。过期 token 在请求发出前预刷新（5 分钟 skew），失败后有 15 秒冷却，避免冗余重试。
 - **SSE 缓冲** — 流式响应按阈值/换行/标点/最大延迟合并分块输出，降低 UI 渲染频率；`reasoning_content` 与 `content` 混排保留。
 - **session 级 `X-Conversation-ID` 稳定化** — 同一个 OpenCode session 内所有请求复用同一 UUID，跨 turn、跨 tool call 一致，提升上游 prompt cache 命中率（`session.compacted` / `session.deleted` 时清掉 LRU 条目）。
 - **环境自动切换** — 同一份插件同时支持 `copilot.tencent.com`（国内版，默认）和 `www.codebuddy.ai`（国际版）；可通过 `CODEBUDDY_NETWORK` 切换，或直接用 `CODEBUDDY_ENDPOINT` 覆盖完整 URL。
@@ -74,8 +104,6 @@ OpenCode 收集用户输入
   ▼  上游 CodeBuddy API
 ```
 
-源码为分层纯核 + 薄胶水：`src/index.ts` 仅接线，核心逻辑在 `config.ts` / `auth-state.ts` / `auth-flow.ts` / `auth-fetch.ts` / `models.ts` / `headers.ts` / `sse-buffer.ts` / `jwt.ts` / `lru.ts` / `fetch-json.ts` 等独立模块（vitest 全覆盖）。
-
 ---
 
 ## 环境变量
@@ -108,36 +136,6 @@ CODEBUDDY_ENDPOINT  >  CODEBUDDY_NETWORK  >  provider.codebuddy.options.baseURL 
 2. **`CODEBUDDY_NETWORK`** 决定国内 / 国际端点。
 3. **`provider.codebuddy.options.baseURL`**（opencode.json 配置）→ 仅当 `CODEBUDDY_ENDPOINT` **未设置**时生效，可覆盖 `CODEBUDDY_NETWORK` 的结果。
 4. 否则默认国内端点 `https://copilot.tencent.com`。
-
-> **2.0.0 优先级反转（破坏性）**：v1 中 opencode.json 里配置的 `provider.options.baseURL` 会覆盖 env 解析结果；v2 中 env（`CODEBUDDY_ENDPOINT` / `CODEBUDDY_NETWORK`）优先，baseURL 仅在 `CODEBUDDY_ENDPOINT` 未设置时生效。若你依赖 baseURL 指定自定义端点，升级后需要改用 `CODEBUDDY_ENDPOINT`。
-
----
-
-## 迁移指南（v1 → v2）
-
-**2.0.0 无兼容层**：旧 env 变量静默失效（不报错、不警告），v1 的 `provider.options.baseURL` 优先级反转。升级 = 重命名 env + 核对 baseURL 用法。
-
-### env 重命名映射
-
-| v1（旧） | v2（新） | 说明 |
-| ---- | ---- | ---- |
-| `CODEBUDDY_API_ENDPOINT` | `CODEBUDDY_ENDPOINT` | 完整 URL 覆盖，优先级最高 |
-| `CODEBUDDY_INTERNET_ENVIRONMENT` | `CODEBUDDY_NETWORK` | `internal`/`ioa` → 国内，其他值（含 `internet`）→ 国际 |
-| `CODEBUDDY_AUTH_MODE` | `CODEBUDDY_AUTH` | `auto` / `oauth` / `api` |
-| `CODEBUDDY_DEFAULT_MODEL` | `CODEBUDDY_MODEL` | 强制覆盖请求 model |
-| `CODEBUDDY_SSE_BUFFER` | `CODEBUDDY_SSE` | `0` = 禁用缓冲 |
-| `CODEBUDDY_SSE_BUFFER_THRESHOLD` | `CODEBUDDY_SSE_THRESHOLD` | 缓冲字节阈值 |
-| `CODEBUDDY_SSE_BUFFER_MAX_DELAY_MS` | `CODEBUDDY_SSE_DELAY_MS` | 最大延迟 flush |
-| `CODEBUDDY_CONVERSATION_ID_MAP_MAX` | `CODEBUDDY_CONVERSATION_MAP_MAX` | LRU 容量 |
-| `CODEBUDDY_STABLE_CONVERSATION_ID` | `CODEBUDDY_STABLE_CONVERSATION` | `0` = 禁用稳定化 |
-
-**未变**：`CODEBUDDY_TENANT_ID` / `CODEBUDDY_ENTERPRISE_ID` / `CODEBUDDY_USER_ID` / `CODEBUDDY_API_KEY`。
-
-### 其他变更
-
-- **hook 清单**：v1 README 声称的 `chat.params` / `chat.message` hook 实际不存在（v1 亦未实现），v2 仅实现 `config` / `event` / `auth.loader` / `chat.headers` 四个 hook。
-- **包名**：npm 包名沿用 `opencode-codebuddy-oauth`；`files` 白名单仅含 `dist`，`.opencode/` 与脚本不再打包。
-- **模型发现缓存**：新增 5 分钟 TTL + 并发单飞；401/403 不缓存（走刷新提示）。
 
 ---
 
@@ -186,6 +184,55 @@ CODEBUDDY_NETWORK=internal
 
 ---
 
+## 自动模型发现（OAuth 模式）
+
+OAuth 模式下，插件加载时会调用 `GET ${serverUrl}/v3/config`（5 秒超时，`DISCOVERY_TIMEOUT_MS`），从响应的 `data.agents[]` 中寻找 `name === "craft"`（`AGENT_INTENT` 常量）的 craft agent，取其 `models[]` 模型 id 列表，逐个通过 `remoteModelToConfig()` 把 CodeBuddy 的 `RemoteModel` 转换为 opencode provider 模型格式，合并进 `provider.codebuddy.models`。
+
+`RemoteModel` 字段（`src/models.ts`）：
+
+| 字段 | 转换结果 |
+| ---- | ---- |
+| `id` / `name` | 模型 id 与显示名 |
+| `maxInputTokens` / `maxOutputTokens` / `maxAllowedSize` | `limit.context`（优先取 `maxAllowedSize`）/ `limit.output` |
+| `supportsToolCall` | `tool_call` |
+| `supportsImages` + `disabledMultimodal` | `attachment`（两者皆真才启用） |
+| `supportsReasoning` | `reasoning: true` + `interleaved: { field: "reasoning_content" }` |
+| `reasoning.effort` / `defaultEffort` / `supportedEfforts` | `options.reasoningEffort` 与 `variants`（各 effort 一个变体） |
+
+合并行为（`mergeModelEntry`）：发现结果与用户在 `opencode.json` 中手动声明的模型条目合并，**用户声明优先**（已存在条目时，以用户字段覆盖自动生成的同名字段；`reasoning: false` 可显式关闭推理映射）。
+
+缓存与降级（`DiscoveryCache`，`src/models.ts`）：
+
+- 结果缓存 **5 分钟 TTL**（`DISCOVERY_CACHE_TTL_MS`），且**并发单飞**——同一时刻多个请求共享同一次抓取。
+- **401/403 不缓存**：原样抛出并提示重新登录（token 可能已过期）。
+- 发现失败（网络/5xx）或返回空时，回退内置 **`auto`** 模型（168k context / 32k output / `tool_call`）。
+- 缓存跟随当前生效的服务器地址（`CODEBUDDY_ENDPOINT` / `CODEBUDDY_NETWORK` / baseURL 解析结果变化后重新抓取，`4985ee9`）。
+
+**API Key 模式不执行发现**（`/v3/config` 接口在 API Key 认证下不返回模型列表，插件直接跳过并提示使用 `opencode.json` 配置），模型需手动声明，见上一节。
+
+---
+
+## SSE 缓冲
+
+CodeBuddy 上游在打开推理模式后，会把 `reasoning_content` 切成大量小分块推送（旧版未做处理直接透传时，UI 出现严重的推理内容片断化——一两字一闪、频繁刷新）。`src/sse-buffer.ts` 的 `createSSEBufferedStream` 用 `TransformStream` 按行解析 SSE 分块，把 `reasoning_content` 与 `content` 各自攒入独立缓冲，满足以下任一条件才 flush：
+
+| 触发条件 | 说明 |
+| ---- | ---- |
+| 字节阈值 | `CODEBUDDY_SSE_THRESHOLD`，默认 `24` 字节 |
+| 标点 / 换行 | 正则 `/。！？.!?；;，,：:$/` 或 `\n` |
+| 最大延迟 | `CODEBUDDY_SSE_DELAY_MS`，默认 `40ms` 定时 flush |
+
+细节行为：
+
+- **切换字段时强制冲刷**另一缓冲（如 reasoning → content 的过渡点）。
+- `[DONE]` / 非 JSON 行 / 工具调用等**旁路原样透传**，不进入缓冲。
+- 两字段**混排顺序保留**——先 reasoning 后 content，互不吞并。
+- 效果：推理过程在界面流畅整段显示，不再碎片闪烁。
+
+`CODEBUDDY_SSE=0` 可完全禁用缓冲（响应原样透传）。
+
+---
+
 ## 缓存行为
 
 OpenCode 每个 turn 都会把完整 message history 重发到 `/chat/completions`，客户端侧 prefix 天然稳定。插件在此之上加了一层 **session 级 conversation-id 稳定化**：
@@ -223,9 +270,21 @@ npm test             # vitest 全套
 
 ```
 .
-├── src/               # 分层纯核：config / auth-* / models / headers / sse-buffer / jwt / lru / fetch-json / log
-├── test/              # vitest 用例（镜像源文件）
-├── dist/              # 编译产物（已 gitignore）
+├── src/
+│   ├── index.ts        # 入口：hook 接线 / auth.methods / chat.headers
+│   ├── config.ts       # env 解析 + 地址优先级链
+│   ├── auth-state.ts   # OAuth 状态机
+│   ├── auth-flow.ts    # state 请求 / token 轮询 / 刷新 / RefreshLock
+│   ├── auth-fetch.ts   # fetch 拦截器：注入头 / 401-403 刷新重试 / SSE 包装
+│   ├── models.ts       # /v3/config 发现 + 格式转换 + DiscoveryCache
+│   ├── headers.ts      # X-Conversation-ID / B3 / X-Model-ID 等 22 头
+│   ├── sse-buffer.ts   # 流缓冲（reasoning/content 合并 flush）
+│   ├── jwt.ts          # JWT 解码与身份提取
+│   ├── lru.ts          # LRUMap
+│   ├── fetch-json.ts   # 带超时的 JSON fetch
+│   └── log.ts          # 日志
+├── test/               # vitest 用例（镜像源文件）
+├── dist/               # 编译产物（已 gitignore）
 ├── LICENSE
 ├── README.md
 ├── package.json
@@ -236,4 +295,4 @@ npm test             # vitest 全套
 
 ## 许可证
 
-[MIT](./LICENSE) — © 2026 HunkYuan。
+[MIT](./LICENSE) — © 2026 Ming Lo。

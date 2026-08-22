@@ -1,5 +1,8 @@
 {
   "name": "opencode-codebuddy-plugin-wrapper",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "@opencode-ai/plugin": "1.18.20"
+  }
 }
