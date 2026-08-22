@@ -18,7 +18,7 @@ export function createSSEBufferedStream(
   const encoder = new TextEncoder();
   const threshold = opts.threshold;
   const maxDelay = opts.maxDelayMs;
-  let chunks: string[] = [];
+  let pending = "";
   let reasoningBuf = "";
   let contentBuf = "";
   let reasoningTimer: ReturnType<typeof setTimeout> | null = null;
@@ -26,6 +26,10 @@ export function createSSEBufferedStream(
 
   const clearReasoningTimer = () => { if (reasoningTimer) { clearTimeout(reasoningTimer); reasoningTimer = null; } };
   const clearContentTimer = () => { if (contentTimer) { clearTimeout(contentTimer); contentTimer = null; } };
+  const flushAll = (controller: TransformStreamDefaultController<Uint8Array>) => {
+    if (reasoningBuf) { flushBuf(controller, "reasoning_content", reasoningBuf); reasoningBuf = ""; clearReasoningTimer(); }
+    if (contentBuf) { flushBuf(controller, "content", contentBuf); contentBuf = ""; clearContentTimer(); }
+  };
 
   const scheduleReasoningFlush = (ctrl: TransformStreamDefaultController<Uint8Array>) => {
     if (reasoningTimer || !reasoningBuf) return;
@@ -46,34 +50,28 @@ export function createSSEBufferedStream(
 
   return body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
-      chunks.push(decoder.decode(chunk, { stream:true }));
-      const all = chunks.join("");
-      chunks = [];
-      const nl = all.lastIndexOf("\n");
-      if (nl === -1) { chunks = [all]; return; }
-      const complete = all.slice(0, nl + 1);
-      const rest = all.slice(nl + 1);
-      if (rest) chunks = [rest];
+      pending += decoder.decode(chunk, { stream:true });
+      const nl = pending.lastIndexOf("\n");
+      if (nl === -1) return;
+      const complete = pending.slice(0, nl + 1);
+      pending = pending.slice(nl + 1);
       const lines = complete.split("\n");
       if (lines[lines.length - 1] === "") lines.pop();
       for (const line of lines) {
         if (!line.startsWith("data: ")) {
-          if (reasoningBuf) { flushBuf(controller, "reasoning_content", reasoningBuf); reasoningBuf=""; clearReasoningTimer(); }
-          if (contentBuf) { flushBuf(controller, "content", contentBuf); contentBuf=""; clearContentTimer(); }
+          flushAll(controller);
           controller.enqueue(encoder.encode(line + "\n"));
           continue;
         }
         const payloadStr = line.slice(6);
         if (payloadStr.trim() === "[DONE]") {
-          if (reasoningBuf) { flushBuf(controller, "reasoning_content", reasoningBuf); reasoningBuf=""; clearReasoningTimer(); }
-          if (contentBuf) { flushBuf(controller, "content", contentBuf); contentBuf=""; clearContentTimer(); }
+          flushAll(controller);
           controller.enqueue(encoder.encode(line + "\n"));
           continue;
         }
         let payload: Record<string,unknown>;
         try { payload = JSON.parse(payloadStr) as Record<string,unknown>; } catch {
-          if (reasoningBuf) { flushBuf(controller, "reasoning_content", reasoningBuf); reasoningBuf=""; clearReasoningTimer(); }
-          if (contentBuf) { flushBuf(controller, "content", contentBuf); contentBuf=""; clearContentTimer(); }
+          flushAll(controller);
           controller.enqueue(encoder.encode(line + "\n"));
           continue;
         }
@@ -111,8 +109,7 @@ export function createSSEBufferedStream(
           }
           continue;
         }
-        if (reasoningBuf) { flushBuf(controller, "reasoning_content", reasoningBuf); reasoningBuf=""; clearReasoningTimer(); }
-        if (contentBuf) { flushBuf(controller, "content", contentBuf); contentBuf=""; clearContentTimer(); }
+        flushAll(controller);
         controller.enqueue(encoder.encode(line + "\n"));
       }
     },
@@ -120,7 +117,7 @@ export function createSSEBufferedStream(
       clearReasoningTimer(); clearContentTimer();
       if (reasoningBuf) flushBuf(controller, "reasoning_content", reasoningBuf);
       if (contentBuf) flushBuf(controller, "content", contentBuf);
-      if (chunks.length) { const rest = chunks.join(""); if (rest) controller.enqueue(encoder.encode(rest)); }
+      if (pending) controller.enqueue(encoder.encode(pending));
     },
   }));
 }

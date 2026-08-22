@@ -11,11 +11,20 @@ function withTimeout(ms: number, external?: AbortSignal) {
 }
 export async function fetchJson<T>(url: string, opts: { method?: string; headers?: Record<string,string>; body?: string; timeoutMs: number; signal?: AbortSignal }) {
   const t = withTimeout(opts.timeoutMs, opts.signal);
+  if (t.signal.aborted) {
+    t.cancel();
+    return { ok: false as const, text: "timeout or abort" };
+  }
+  let abortListener: (() => void) | null = null;
+  const abortPromise = new Promise<never>((_, reject) => {
+    const handler = () => reject(new DOMException("aborted", "AbortError"));
+    abortListener = handler;
+    t.signal.addEventListener("abort", handler, { once: true });
+  });
   try {
-    if (t.signal.aborted) return { ok: false as const, text: "timeout or abort" };
     const res = await Promise.race([
       fetch(url, { method: opts.method, headers: opts.headers, body: opts.body, signal: t.signal }),
-      new Promise<never>((_, reject) => t.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true })),
+      abortPromise,
     ]);
     if (!res.ok) {
       const text = (await res.text()).slice(0, 500);
@@ -23,7 +32,12 @@ export async function fetchJson<T>(url: string, opts: { method?: string; headers
     }
     const data = await res.json() as T;
     return { ok: true as const, data };
-  } catch {
-    return { ok: false as const, text: "timeout or abort" };
-  } finally { t.cancel(); }
+  } catch (e) {
+    const err = e as Error;
+    const isAbort = err?.name === "AbortError" || err?.message === "aborted";
+    return { ok: false as const, text: isAbort ? "timeout or abort" : (err?.message || "fetch failed") };
+  } finally {
+    if (abortListener) t.signal.removeEventListener("abort", abortListener);
+    t.cancel();
+  }
 }

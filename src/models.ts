@@ -1,5 +1,5 @@
 import { fetchJson } from "./fetch-json.js";
-import { AGENT_INTENT, DISCOVERY_TIMEOUT_MS } from "./config.js";
+import { AGENT_INTENT, DISCOVERY_TIMEOUT_MS, IDE_NAME, IDE_TYPE, IDE_VERSION, APP_VERSION, ENV_ID, PRODUCT } from "./config.js";
 export interface RemoteModel { id:string; name:string; maxInputTokens?:number; maxOutputTokens?:number; maxAllowedSize?:number; supportsToolCall?:boolean; supportsImages?:boolean; supportsReasoning?:boolean; disabledMultimodal?:boolean; reasoning?:{ effort?:string; defaultEffort?:string; supportedEfforts?:string[] }; }
 export const DEFAULT_MODEL: RemoteModel = { id:"auto", name:"Auto", maxInputTokens:168000, maxOutputTokens:32000, supportsToolCall:true };
 
@@ -15,10 +15,10 @@ export async function fetchRemoteModels(
     "X-Requested-With": "XMLHttpRequest",
     Authorization: `Bearer ${accessToken}`,
     "X-Agent-Intent": AGENT_INTENT,
-    "X-IDE-Type": "VSCode", "X-IDE-Name": "VSCode", "X-IDE-Version": "1.119.0",
-    "X-Product-Version": "4.9.29177644", "X-Env-ID": "production",
-    "X-Domain": server.domain, "X-Product": "SaaS",
-    "User-Agent": "VSCode/1.119.0 CodeBuddy/4.9.29177644",
+    "X-IDE-Type": IDE_TYPE, "X-IDE-Name": IDE_NAME, "X-IDE-Version": IDE_VERSION,
+    "X-Product-Version": APP_VERSION, "X-Env-ID": ENV_ID,
+    "X-Domain": server.domain, "X-Product": PRODUCT,
+    "User-Agent": `${IDE_NAME}/${IDE_VERSION} CodeBuddy/${APP_VERSION}`,
   };
   const res = await fetchJson<RemoteConfigResponse>(`${server.url}/v3/config`, {
     headers, timeoutMs: DISCOVERY_TIMEOUT_MS, signal,
@@ -69,7 +69,7 @@ export class DiscoveryCache {
   private data: RemoteModel[] | null = null;
   private fetchedAt = 0;
   private inflight: Promise<RemoteModel[]> | null = null;
-  fetchFn: (token: string, signal?: AbortSignal) => Promise<RemoteModel[]>;
+  private readonly fetchFn: (token: string, signal?: AbortSignal) => Promise<RemoteModel[]>;
   constructor(private opts: { ttlMs:number; fetchFn: (token: string, signal?: AbortSignal)=>Promise<RemoteModel[]> }) { this.fetchFn = opts.fetchFn; }
   async get(token:string, { signal }: { signal?:AbortSignal }): Promise<RemoteModel[]> {
     const now = Date.now();

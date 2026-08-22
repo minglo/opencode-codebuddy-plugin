@@ -19,8 +19,11 @@ function getOrCreateConversationId(lru: LRUMap<string,string>, sessionId: string
 export function resolveModel(input: string | undefined, cfg: CodeBuddyConfig): string {
   return cfg.model ? cfg.model : (input ?? "");
 }
+const baseHeadersCache = new Map<string, Record<string,string>>();
 export function baseHeaders(cfg: CodeBuddyConfig, domain: string): Record<string,string> {
-  return {
+  const cached = baseHeadersCache.get(domain);
+  if (cached) return cached;
+  const headers: Record<string,string> = {
     Accept: "application/json, text/plain, */*",
     "Content-Type": "application/json",
     "X-Requested-With": "XMLHttpRequest",
@@ -34,6 +37,8 @@ export function baseHeaders(cfg: CodeBuddyConfig, domain: string): Record<string
     "X-Product": cfg.product,
     "User-Agent": `${cfg.ideName}/${cfg.ideVersion} CodeBuddy/${cfg.appVersion}`,
   };
+  baseHeadersCache.set(domain, headers);
+  return headers;
 }
 export function buildRequestHeaders(
   sessionId: string | undefined,

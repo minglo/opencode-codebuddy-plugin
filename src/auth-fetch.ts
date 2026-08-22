@@ -60,22 +60,30 @@ export function createAuthFetch(deps: AuthFetchDeps) {
     };
     let activeAuth: AuthState = auth;
     // A4 预刷新：过期前 REFRESH_SKEW_MS 内先刷新（RefreshLock 单飞，避免并发），失败则沿用旧 token；失败后 15s 冷却期内不再试
+    // 写回收进 lock 内部，并发请求共享同一 refresh + 单次 client.auth.set，避免幂等双写
     if (activeAuth.type === "oauth" && activeAuth.refresh && needsRefresh(activeAuth, Date.now()) && !inCooldown()) {
       const oauthAuth = activeAuth;
-      const refreshed = await refreshLock.run("codebuddy", () => deps.refreshAccessToken(oauthAuth.refresh, server.url));
-      if (refreshed?.accessToken) activeAuth = await applyRefresh(oauthAuth, refreshed);
-      else lastRefreshFailedAt = Date.now();
+      const next = await refreshLock.run("codebuddy", async () => {
+        const r = await deps.refreshAccessToken(oauthAuth.refresh, server.url);
+        if (r?.accessToken) return await applyRefresh(oauthAuth, r);
+        lastRefreshFailedAt = Date.now();
+        return null;
+      });
+      if (next) activeAuth = next;
     }
     let response = await doRequest(activeAuth);
     if (activeAuth.type === "oauth" && (response.status === 401 || response.status === 403) && activeAuth.refresh && !inCooldown()) {
-      // 401/403 兜底：RefreshLock 按 PROVIDER_ID 单例，冷却期内跳过
+      // 401/403 兜底：RefreshLock 按 PROVIDER_ID 单例，冷却期内跳过；写回收进 lock 单次执行
       const oauthAuth = activeAuth;
-      const refreshed = await refreshLock.run("codebuddy", () => deps.refreshAccessToken(oauthAuth.refresh, server.url));
-      if (refreshed?.accessToken) {
-        activeAuth = await applyRefresh(oauthAuth, refreshed);
-        response = await doRequest(activeAuth);
-      } else {
+      const next = await refreshLock.run("codebuddy", async () => {
+        const r = await deps.refreshAccessToken(oauthAuth.refresh, server.url);
+        if (r?.accessToken) return await applyRefresh(oauthAuth, r);
         lastRefreshFailedAt = Date.now();
+        return null;
+      });
+      if (next) {
+        activeAuth = next;
+        response = await doRequest(activeAuth);
       }
     }
     if (!response.ok) {

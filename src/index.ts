@@ -1,7 +1,7 @@
 // src/index.ts — 薄胶水，禁止模块级 let
 import type { Plugin, PluginInput } from "@opencode-ai/plugin";
 import * as fs from "fs";
-import { getConfig, resolveServerUrl, getAuthJsonPath, PROVIDER_ID, CHAT_COMPLETIONS_PATH } from "./config.js";
+import { getConfig, resolveServerUrl, getAuthJsonPath, domainForHost, PROVIDER_ID, CHAT_COMPLETIONS_PATH, DEFAULT_EXPIRES_MS, DISCOVERY_CACHE_TTL_MS, POLL_TOTAL_TIMEOUT_MS } from "./config.js";
 import { createLogger } from "./log.js";
 import { LRUMap } from "./lru.js";
 import { parseStoredAuth, effectiveAuth, pickAuthMode } from "./auth-state.js";
@@ -19,7 +19,7 @@ export const CodeBuddyAuthPlugin: Plugin = async (input: PluginInput) => {
   const logger = createLogger(input.client as any);
   const refreshLock = new RefreshLock();
   const discoveryCache = new DiscoveryCache({
-    ttlMs: 5*60*1000,
+    ttlMs: DISCOVERY_CACHE_TTL_MS,
     // fetchFn 闭包捕获 live server（let）：config hook 覆写 baseURL 后 discovery 与 loader 打同一 host
     fetchFn: (token, signal) => fetchRemoteModels(token, server, signal),
   });
@@ -35,7 +35,7 @@ export const CodeBuddyAuthPlugin: Plugin = async (input: PluginInput) => {
         if (configuredBase) {
           try {
             const u = new URL(configuredBase);
-            server = { url: `${u.protocol}//${u.host}`, domain: u.host.includes("codebuddy.ai") ? "www.codebuddy.ai" : server.domain };
+            server = { url: `${u.protocol}//${u.host}`, domain: domainForHost(u.host) };
           } catch {}
         }
       }
@@ -133,12 +133,12 @@ export const CodeBuddyAuthPlugin: Plugin = async (input: PluginInput) => {
       methods: [
         { label: "IOA 登录 (浏览器)", type: "oauth" as const, async authorize() {
           const state = await requestAuthState(server.url);
-          const expiresAt = Date.now() + 10*60*1000;
+          const expiresAt = Date.now() + POLL_TOTAL_TIMEOUT_MS;
           return { url: state.url, instructions: "请在浏览器中完成 IOA 登录", method: "auto" as const,
             async callback() {
               const tok = await pollForToken(server.url, state.state, expiresAt);
               if (!tok) return { type:"failed" as const };
-              return { type:"success" as const, access: tok.accessToken, refresh: tok.refreshToken || "", expires: tok.expiresIn ? Date.now()+tok.expiresIn*1000 : Date.now()+24*60*60*1000 };
+              return { type:"success" as const, access: tok.accessToken, refresh: tok.refreshToken || "", expires: tok.expiresIn ? Date.now()+tok.expiresIn*1000 : Date.now()+DEFAULT_EXPIRES_MS };
             } };
         }},
         { label: "API Key 登录", type: "api" as const, prompts:[{ type:"text", key:"key", message:"请输入 CodeBuddy API Key（ck_xxx）", placeholder:"ck_xxxxxxxxxxxxxxxx.xxxxx" }], async authorize(inputs: any) {

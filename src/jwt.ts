@@ -10,9 +10,7 @@ export function decodeJwtPayload(token: string): JwtPayload | null {
   try {
     const parts = token.split(".");
     if (parts.length < 2) return null;
-    const payload = parts[1]!.replace(/-/g, "+").replace(/_/g, "/");
-    const pad = "=".repeat((4 - (payload.length % 4)) % 4);
-    return JSON.parse(Buffer.from(payload + pad, "base64").toString("utf8")) as JwtPayload;
+    return JSON.parse(Buffer.from(parts[1]!, "base64url").toString("utf8")) as JwtPayload;
   } catch { return null; }
 }
 
