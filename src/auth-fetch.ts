@@ -24,6 +24,9 @@ export function createAuthFetch(deps: AuthFetchDeps) {
   const { getAuth, client, server, buildAuthHeaders, resolveIdentity, decodeJwtPayload, createSSEBufferedStream, refreshLock, cfg, fetchImpl, chatCompletionsPath } = deps;
   const doFetch = () => fetchImpl ?? globalThis.fetch;
   const logError = (e: unknown) => deps.logger ? deps.logger.error(`auth.json write-back failed: ${(e as Error).message}`) : console.error(`[codebuddy] error: auth.json write-back failed:`, e);
+  let lastRefreshFailedAt = 0;
+  const COOLDOWN_MS = 15_000;
+  const inCooldown = () => Date.now() - lastRefreshFailedAt < COOLDOWN_MS;
   const applyRefresh = async (prev: AuthState & { type:"oauth" }, refreshed: { accessToken:string; refreshToken?:string; expiresIn?:number }): Promise<AuthState> => {
     const newExpires = refreshed.expiresIn ? Date.now() + refreshed.expiresIn * 1000 : Date.now() + DEFAULT_EXPIRES_MS;
     const nextState = { type: "oauth" as const, access: refreshed.accessToken, refresh: refreshed.refreshToken || prev.refresh, expires: newExpires };
@@ -56,20 +59,23 @@ export function createAuthFetch(deps: AuthFetchDeps) {
       return doFetch()(`${server.url}${chatCompletionsPath}`, { method: "POST", headers, body: body as BodyInit, signal: init.signal });
     };
     let activeAuth: AuthState = auth;
-    // A4 预刷新：过期前 REFRESH_SKEW_MS 内先刷新（RefreshLock 单飞，避免并发），失败则沿用旧 token
-    if (activeAuth.type === "oauth" && activeAuth.refresh && needsRefresh(activeAuth, Date.now())) {
+    // A4 预刷新：过期前 REFRESH_SKEW_MS 内先刷新（RefreshLock 单飞，避免并发），失败则沿用旧 token；失败后 15s 冷却期内不再试
+    if (activeAuth.type === "oauth" && activeAuth.refresh && needsRefresh(activeAuth, Date.now()) && !inCooldown()) {
       const oauthAuth = activeAuth;
       const refreshed = await refreshLock.run("codebuddy", () => deps.refreshAccessToken(oauthAuth.refresh, server.url));
       if (refreshed?.accessToken) activeAuth = await applyRefresh(oauthAuth, refreshed);
+      else lastRefreshFailedAt = Date.now();
     }
     let response = await doRequest(activeAuth);
-    if (activeAuth.type === "oauth" && (response.status === 401 || response.status === 403) && activeAuth.refresh) {
-      // 401/403 兜底：RefreshLock 按 PROVIDER_ID 单例
+    if (activeAuth.type === "oauth" && (response.status === 401 || response.status === 403) && activeAuth.refresh && !inCooldown()) {
+      // 401/403 兜底：RefreshLock 按 PROVIDER_ID 单例，冷却期内跳过
       const oauthAuth = activeAuth;
       const refreshed = await refreshLock.run("codebuddy", () => deps.refreshAccessToken(oauthAuth.refresh, server.url));
       if (refreshed?.accessToken) {
         activeAuth = await applyRefresh(oauthAuth, refreshed);
         response = await doRequest(activeAuth);
+      } else {
+        lastRefreshFailedAt = Date.now();
       }
     }
     if (!response.ok) {
